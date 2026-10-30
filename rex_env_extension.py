@@ -17,6 +17,9 @@ Anchors by compartment:
     resource in water/air-> Blue water consumption [Mio. m3]
     other resources (kg) -> Total material footprint [kt]
 
+Outliers: within each pool, activity intensities (flow per unit of anchor) are
+winsorised at the 90th percentile (--cap-quantile) when >= 5 activities emit the flow.
+
 Ratio fallback: regional pool -> global pool -> global pool against GHG.
 Regional pools only contain activities whose ecoinvent location maps to a
 single Exiobase region; GLO, RoW, RER etc. only enter the global pool.
@@ -83,6 +86,12 @@ BAFU_NAME_RULES = [
     (r"\b(rhodium|platinum|palladium|gold|silver|iridium|ruthenium)\b.*(refinery|primary|at plant)", "2420"),
     (r"at mine|\bore\b|concentrate|beneficiation", "0729"),
     (r"formwork", "4390"),
+    (r"^(?!disposal)(?!.*li-ion).*\b(steel|pig iron|sinter)\b", "2410"),
+    (r"^transport, aircraft", "5110"),
+    (r"^transport, .*(transoceanic|freight ship|tanker)", "5012"),
+    (r"^transport, .*barge", "5022"),
+    (r"^transport, .*(train|rail)", "4912"),
+    (r"^transport, .*(lorry|truck|passenger car|bus|coach|van|motor)", "4923"),
 ]
 # BAFU "fuels / <sub>": EcoSpold01 main category by fuel
 BAFU_FUELS = {"natural gas": "natural gas", "uranium": "nuclear power", "oil": "oil",
@@ -345,13 +354,32 @@ def anchor_vectors(flows):
     return occ, w_in, w_out, mat
 
 
-def accumulate(records, B, diag, cf, flows, loc_region, regions, weighting):
+def cap_intensities(X, a, q, min_n):
+    """Winsorise activity intensities (flow per unit of its anchor) at the pool quantile q.
+
+    X: (activities, flows) inventories, a: (activities, flows) anchor of each flow's
+    group. Only flows emitted by >= min_n activities with a positive anchor are capped;
+    activities without a positive anchor are left as they are.
+    """
+    pos = a > 0
+    r = np.where(pos, X / np.where(pos, a, 1.0), 0.0)
+    nz = pos & (r > 0)
+    if not (nz.sum(axis=0) >= min_n).any():
+        return X
+    caps = np.nanquantile(np.where(nz, r, np.nan)[:, nz.sum(axis=0) >= min_n], q, axis=0)
+    cap = np.full(X.shape[1], np.inf)
+    cap[nz.sum(axis=0) >= min_n] = caps
+    return np.where(nz & (r > cap), cap * a, X)
+
+
+def accumulate(records, B, diag, cf, flows, loc_region, regions, weighting, cap_q=0.9, cap_min=5):
     """Pool activities per (sector, region pool + global).
 
     records: iterable of (column, location, sector indices, production volume).
     weighting 'pv': annual flows (per unit * production volume);
     weighting 'ghg': each activity normalised to 1 kg CO2-eq direct GHG (equal weights);
     weighting 'none': per-unit inventories (1 unit of each reference product).
+    cap_q: outlier cap per pool, see cap_intensities (None or >= 1 disables).
     Returns E (n_flows, n_sectors, n_pools), A (n_anchors, ...), n_acts, n_pos.
     """
     occ, w_in, w_out, mat = anchor_vectors(flows)
@@ -362,6 +390,8 @@ def accumulate(records, B, diag, cf, flows, loc_region, regions, weighting):
     n_acts = np.zeros((N_SECTORS, n_pool), int)
     n_pos = np.zeros((len(ANCHORS), N_SECTORS, n_pool), int)  # activities with anchor > 0
     factors = np.array([v[1] for v in ANCHORS.values()])
+    a_of_flow = np.array([list(ANCHORS).index(f["anchor"]) for f in flows])
+    cols, a_vecs, members = [], [], {}
 
     for j, location, secs, pv in records:
         if not secs or diag[j] == 0:
@@ -384,16 +414,28 @@ def accumulate(records, B, diag, cf, flows, loc_region, regions, weighting):
         r = loc_region.get(location)
         if r in reg_index:
             pools.append(reg_index[r])
+        k = len(cols)
+        cols.append(sp.csr_matrix(col))
+        a_vecs.append(a_vec)
         for s in secs:
             for p in pools:
-                E[:, s, p] += col
-                A[:, s, p] += a_vec
-                n_pos[:, s, p] += a_vec > 0
-                n_acts[s, p] += 1
+                members.setdefault((s, p), []).append(k)
+
+    a_vecs = np.array(a_vecs)
+    for (s, p), ks in members.items():
+        X = sp.vstack([cols[k] for k in ks]).toarray()
+        a = a_vecs[ks]
+        if cap_q is not None and cap_q < 1 and len(ks) >= cap_min:
+            X = cap_intensities(X, a[:, a_of_flow], cap_q, cap_min)
+        E[:, s, p] = X.sum(axis=0)
+        A[:, s, p] = a.sum(axis=0)
+        n_pos[:, s, p] = (a > 0).sum(axis=0)
+        n_acts[s, p] = len(ks)
     return E, A, n_acts, n_pos
 
 
-def ecoinvent_pools(project, database, isic_to_exio, code_index, loc_region, regions, weighting="pv"):
+def ecoinvent_pools(project, database, isic_to_exio, code_index, loc_region, regions, weighting="pv",
+                    cap=(0.9, 5)):
     """Pools from ecoinvent 3.x (Brightway 2, bw2calc 1.x): ISIC classification,
     production volumes, ordinary transforming activities only."""
     import bw2data as bd
@@ -424,7 +466,7 @@ def ecoinvent_pools(project, database, isic_to_exio, code_index, loc_region, reg
             secs = isic_sectors(isic, isic_to_exio, code_index, text) if isic else []
             yield lca.activity_dict[(database, rec.code)], rec.location, secs, pv.get(rec.code, 0.0)
 
-    return (flows, *accumulate(records(), B, diag, cf, flows, loc_region, regions, weighting))
+    return (flows, *accumulate(records(), B, diag, cf, flows, loc_region, regions, weighting, *cap))
 
 
 def ecospold1_bridge(project, database):
@@ -439,7 +481,8 @@ def ecospold1_bridge(project, database):
     return pd.DataFrame(rows, columns=["ecospold1", "isic"]).value_counts().rename("n").reset_index()
 
 
-def bafu_pools(project, database, bridge, isic_to_exio, code_index, loc_region, regions, weighting="none"):
+def bafu_pools(project, database, bridge, isic_to_exio, code_index, loc_region, regions, weighting="none",
+               cap=(0.9, 5)):
     """Pools from the BAFU LCI database (Brightway 2.5 / bw2calc 2.x, EF 3.1 flows).
 
     No ISIC and no production volumes: sector via BAFU category -> EcoSpold01 ->
@@ -507,7 +550,7 @@ def bafu_pools(project, database, bridge, isic_to_exio, code_index, loc_region, 
             secs = isic_sectors(isic, isic_to_exio, code_index, text)
             yield lca.dicts.activity[act.id], act.get("location"), secs, 1.0
 
-    pools = (flows, *accumulate(records(), B, diag, cf, flows, loc_region, regions, weighting))
+    pools = (flows, *accumulate(records(), B, diag, cf, flows, loc_region, regions, weighting, *cap))
     print("BAFU activities:", stats)
     return pools
 
@@ -585,9 +628,13 @@ def main():
                     help="pv: production volume (ecoinvent default), ghg: equal weight per kg CO2-eq, "
                          "none: per-unit inventories (BAFU default; BAFU has no production volumes)")
     ap.add_argument("--bridge", help="ecospold1_isic_bridge.csv (BAFU only; written by ecoinvent runs)")
-    ap.add_argument("--min-acts", type=int, default=1, help="min. activities for a regional ratio")
+    ap.add_argument("--min-acts", type=int, default=3, help="min. activities in a pool for its ratio")
     ap.add_argument("--min-share", type=float, default=0.5,
                     help="min. share of activities with a positive anchor to use that anchor")
+    ap.add_argument("--cap-quantile", type=float, default=0.9,
+                    help="winsorise activity intensities per pool at this quantile (1 disables)")
+    ap.add_argument("--cap-min", type=int, default=5,
+                    help="min. emitting activities in a pool before the cap applies")
     ap.add_argument("--global-only", action="store_true",
                     help="use global sector ratios for all countries (no regional pools)")
     ap.add_argument("--out", required=True)
@@ -618,17 +665,18 @@ def main():
     weighting = args.weighting or ("none" if args.source == "bafu" else "pv")
     if args.source == "bafu" and weighting == "pv":
         ap.error("BAFU has no production volumes: use --weighting none or ghg")
-    cache = out / f"pools_{args.database}_{weighting}"
+    cap = (args.cap_quantile, args.cap_min)
+    cache = out / f"pools_{args.database}_{weighting}_cap{args.cap_quantile:g}"
     if cache.with_suffix(".npz").exists():
         flows, E, A, n_acts, n_pos = load_pools(cache)
     else:
         if args.source == "bafu":
             bridge = pd.read_csv(args.bridge, dtype={"isic": str})
             pools = bafu_pools(args.project, args.database, bridge, dicts["isic_to_exio"],
-                               code_index, location_regions(s2), regions, weighting)
+                               code_index, location_regions(s2), regions, weighting, cap)
         else:
             pools = ecoinvent_pools(args.project, args.database, dicts["isic_to_exio"],
-                                    code_index, location_regions(s2), regions, weighting)
+                                    code_index, location_regions(s2), regions, weighting, cap)
             ecospold1_bridge(args.project, args.database).to_csv(out / "ecospold1_isic_bridge.csv", index=False)
         save_pools(cache, pools)
         flows, E, A, n_acts, n_pos = pools
