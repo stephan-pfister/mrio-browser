@@ -78,6 +78,12 @@ BAFU_CATEGORY_ALIAS = {
     "flooring": "building components", "building processes": "construction processes",
     "power plants": "isic:3510",
 }
+# BAFU dataset names that override the (coarse) category -> ISIC bridge
+BAFU_NAME_RULES = [
+    (r"\b(rhodium|platinum|palladium|gold|silver|iridium|ruthenium)\b.*(refinery|primary|at plant)", "2420"),
+    (r"at mine|\bore\b|concentrate|beneficiation", "0729"),
+    (r"formwork", "4390"),
+]
 # BAFU "fuels / <sub>": EcoSpold01 main category by fuel
 BAFU_FUELS = {"natural gas": "natural gas", "uranium": "nuclear power", "oil": "oil",
               "biomass": "biomass", "wood": "wood energy", "hard coal": "hard coal",
@@ -344,7 +350,8 @@ def accumulate(records, B, diag, cf, flows, loc_region, regions, weighting):
 
     records: iterable of (column, location, sector indices, production volume).
     weighting 'pv': annual flows (per unit * production volume);
-    weighting 'ghg': each activity normalised to 1 kg CO2-eq direct GHG (equal weights).
+    weighting 'ghg': each activity normalised to 1 kg CO2-eq direct GHG (equal weights);
+    weighting 'none': per-unit inventories (1 unit of each reference product).
     Returns E (n_flows, n_sectors, n_pools), A (n_anchors, ...), n_acts, n_pos.
     """
     occ, w_in, w_out, mat = anchor_vectors(flows)
@@ -360,8 +367,15 @@ def accumulate(records, B, diag, cf, flows, loc_region, regions, weighting):
         if not secs or diag[j] == 0:
             continue
         col = B[:, j].toarray().ravel() / diag[j]
+        if not col.any():  # no direct exchanges (pure technosphere datasets)
+            continue
         ghg = cf @ col
-        scale = pv if weighting == "pv" else (1 / ghg if ghg > 0 else 0.0)
+        if weighting == "pv":
+            scale = pv
+        elif weighting == "ghg":
+            scale = 1 / ghg if ghg > 0 else 0.0
+        else:  # none: per-unit inventories summed as they are
+            scale = 1.0
         if scale <= 0:
             continue
         col *= scale / len(secs)
@@ -425,12 +439,13 @@ def ecospold1_bridge(project, database):
     return pd.DataFrame(rows, columns=["ecospold1", "isic"]).value_counts().rename("n").reset_index()
 
 
-def bafu_pools(project, database, bridge, isic_to_exio, code_index, loc_region, regions):
+def bafu_pools(project, database, bridge, isic_to_exio, code_index, loc_region, regions, weighting="none"):
     """Pools from the BAFU LCI database (Brightway 2.5 / bw2calc 2.x, EF 3.1 flows).
 
     No ISIC and no production volumes: sector via BAFU category -> EcoSpold01 ->
-    most frequent ecoinvent ISIC (+ keyword refinement); activities weighted equally
-    (per kg CO2-eq). Skips obsolete datasets, mixes/markets and infrastructure (unit 'unit').
+    most frequent ecoinvent ISIC (+ keyword refinement); activities unweighted (per
+    unit of product) or equal per kg CO2-eq. Skips obsolete datasets, mixes/markets
+    and infrastructure (unit 'unit').
     """
     import bw2data as bd
     import bw2calc as bc
@@ -445,6 +460,9 @@ def bafu_pools(project, database, bridge, isic_to_exio, code_index, loc_region, 
     main_isic = dict(zip(main["main"], main.isic))
 
     def isic_of(act):
+        rule = next((isic for pat, isic in BAFU_NAME_RULES if re.search(pat, act["name"], re.I)), None)
+        if rule:
+            return rule
         m = re.search(r"BAFU category: (.*?)\. Source", act.get("comment") or "")
         if not m:
             return None
@@ -489,7 +507,7 @@ def bafu_pools(project, database, bridge, isic_to_exio, code_index, loc_region, 
             secs = isic_sectors(isic, isic_to_exio, code_index, text)
             yield lca.dicts.activity[act.id], act.get("location"), secs, 1.0
 
-    pools = (flows, *accumulate(records(), B, diag, cf, flows, loc_region, regions, "ghg"))
+    pools = (flows, *accumulate(records(), B, diag, cf, flows, loc_region, regions, weighting))
     print("BAFU activities:", stats)
     return pools
 
@@ -509,7 +527,7 @@ def load_pools(path):
 # ---------------------------------------------------------------------------
 # Ratios and extension
 # ---------------------------------------------------------------------------
-def ratios(flows, E, A, n_acts, n_pos, min_acts=1, min_share=0.5):
+def ratios(flows, E, A, n_acts, n_pos, min_acts=1, min_share=0.5, global_only=False):
     """R[f, s, pool] and the fallback level used per (anchor, sector, pool).
 
     A pool/anchor is usable if its total is > 0, it has >= min_acts activities and
@@ -520,6 +538,8 @@ def ratios(flows, E, A, n_acts, n_pos, min_acts=1, min_share=0.5):
     a_idx = np.array([anchor_names.index(f["anchor"]) for f in flows])
     glob = E.shape[2] - 1
     ok = (A > 0) & (n_acts >= min_acts) & (n_pos >= min_share * np.maximum(n_acts, 1))
+    if global_only:
+        ok[:, :, :glob] = False
     R = np.zeros_like(E)
     level = np.full((len(ANCHORS), N_SECTORS, E.shape[2]), 4, np.int8)
     for a in range(len(ANCHORS)):
@@ -561,12 +581,15 @@ def main():
     ap.add_argument("--source", choices=["ecoinvent", "bafu"], default="ecoinvent")
     ap.add_argument("--project", default="default")
     ap.add_argument("--database", default="cutoff391")
-    ap.add_argument("--weighting", choices=["pv", "ghg"], default="pv",
-                    help="ecoinvent: production volume or equal weight per kg CO2-eq (BAFU: always ghg)")
+    ap.add_argument("--weighting", choices=["pv", "ghg", "none"],
+                    help="pv: production volume (ecoinvent default), ghg: equal weight per kg CO2-eq, "
+                         "none: per-unit inventories (BAFU default; BAFU has no production volumes)")
     ap.add_argument("--bridge", help="ecospold1_isic_bridge.csv (BAFU only; written by ecoinvent runs)")
     ap.add_argument("--min-acts", type=int, default=1, help="min. activities for a regional ratio")
     ap.add_argument("--min-share", type=float, default=0.5,
                     help="min. share of activities with a positive anchor to use that anchor")
+    ap.add_argument("--global-only", action="store_true",
+                    help="use global sector ratios for all countries (no regional pools)")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
 
@@ -592,7 +615,9 @@ def main():
     regions = sorted(set(c_regions))
     country_pool = [regions.index(r) for r in c_regions]
 
-    weighting = "ghg" if args.source == "bafu" else args.weighting
+    weighting = args.weighting or ("none" if args.source == "bafu" else "pv")
+    if args.source == "bafu" and weighting == "pv":
+        ap.error("BAFU has no production volumes: use --weighting none or ghg")
     cache = out / f"pools_{args.database}_{weighting}"
     if cache.with_suffix(".npz").exists():
         flows, E, A, n_acts, n_pos = load_pools(cache)
@@ -600,7 +625,7 @@ def main():
         if args.source == "bafu":
             bridge = pd.read_csv(args.bridge, dtype={"isic": str})
             pools = bafu_pools(args.project, args.database, bridge, dicts["isic_to_exio"],
-                               code_index, location_regions(s2), regions)
+                               code_index, location_regions(s2), regions, weighting)
         else:
             pools = ecoinvent_pools(args.project, args.database, dicts["isic_to_exio"],
                                     code_index, location_regions(s2), regions, weighting)
@@ -611,7 +636,7 @@ def main():
     keep = np.abs(E[:, :, -1]).sum(axis=1) > 0           # flows present in some sector
     flows = [f for f, k in zip(flows, keep) if k]
     E = E[keep]
-    R, level, a_idx = ratios(flows, E, A, n_acts, n_pos, args.min_acts, args.min_share)
+    R, level, a_idx = ratios(flows, E, A, n_acts, n_pos, args.min_acts, args.min_share, args.global_only)
 
     pd.DataFrame([{k: v for k, v in f.items() if k not in ("key", "categories")} for f in flows]).assign(
         rex_anchor=[q_labels[ANCHORS[f["anchor"]][0]] for f in flows]
