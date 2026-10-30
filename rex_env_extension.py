@@ -1,14 +1,14 @@
 """
-REX3 environmental extension from ecoinvent
-============================================
-Extends the REX3 satellite (Q_REX) with all ecoinvent elementary flows by
-scaling sector-level ecoinvent flow ratios with an existing REX extension
-("anchor"):
+REX3 environmental extension from ecoinvent (or BAFU LCI)
+==========================================================
+Extends the REX3 satellite (Q_REX) with all LCI elementary flows by scaling
+sector-level flow ratios with an existing REX extension ("anchor"):
 
     F[f, c, s] = R[f, s, region(c)] * Q_REX[anchor(f), c, s]
-    R[f, s, r] = sum_j flow_f,j / sum_j anchor_j     (j: ecoinvent activities
-                                                     of sector s in region r,
-                                                     annual = per unit * PV)
+    R[f, s, r] = sum_j w_j flow_f,j / sum_j w_j anchor_j   (j: activities of sector s
+                                                            in region r)
+    w_j = production volume (ecoinvent, default) or 1 / direct GHG_j (equal weights;
+          always used for BAFU, which has no production volumes)
 
 Anchors by compartment:
     air, other           -> Climate change impacts [kg CO2-eq]  (IPCC 2021 GWP100)
@@ -24,8 +24,17 @@ single Exiobase region; GLO, RoW, RER etc. only enter the global pool.
 Mapping files (Peng & Pfister 2023, JIE): sector_matching_dicts.pickle,
 S2_ecoinvent_region_TO_exiobase_region.xlsx.
 
-Run with the Activity Browser environment (bw2data/bw2calc 1.x + h5py):
+BAFU datasets have no ISIC code: BAFU category -> EcoSpold01 category -> most
+frequent ISIC in ecoinvent 3 (bridge written by every ecoinvent run).
+
+Run ecoinvent with the Activity Browser environment (bw2data/bw2calc 1.x + h5py):
     python rex_env_extension.py --rex-dir <REX3_2022> --map-dir <mapping folder> --out <dir>
+BAFU pools need Brightway 2.5 (e.g. the Werkbank venv), then F in the AB env:
+    <werkbank python> rex_env_extension.py --source bafu --project "bafu test" --database bafu-2026
+        --meta <ecoinvent out>/meta.json --bridge <ecoinvent out>/ecospold1_isic_bridge.csv
+        --map-dir <mapping folder> --out <bafu out>
+    python rex_env_extension.py --source bafu --database bafu-2026 --meta ... --map-dir ...
+        --rex-dir <REX3_2022> --out <bafu out>        (reuses the cached pools)
 """
 
 import argparse
@@ -35,7 +44,6 @@ import pickle
 import re
 from pathlib import Path
 
-import h5py
 import numpy as np
 import pandas as pd
 import scipy.sparse as sp
@@ -51,9 +59,32 @@ ANCHORS = {
     "material": (0, 1e-6),    # kg -> kt
 }
 GHG_METHOD = ("IPCC 2021", "climate change", "global warming potential (GWP100)")
+BAFU_GHG_METHOD = ("sentier", "EF v3.1", "Climate change")
+
+# BAFU (ecoinvent v2 structure) datasets that are mixes or markets
+BAFU_SKIP = r"regional storage|market|mix\b|delivered via network|kbob recommendation"
+# BAFU main categories without an EcoSpold01 counterpart in ecoinvent 3:
+# -> EcoSpold01 main category, or "isic:<code>" (sector then refined by keywords)
+BAFU_CATEGORY_ALIAS = {
+    "heat": "isic:3530", "heating": "building components", "electricity by fuel": "isic:3510",
+    "wood": "wooden materials", "construction": "construction processes",
+    "agricultural": "agricultural production", "water": "water supply", "landfill": "isic:3821",
+    "incineration": "isic:3821", "nuclear waste": "isic:3822", "construction waste": "isic:3821",
+    "electronics waste": "isic:3821", "transport waste": "isic:3821", "waste": "isic:3821",
+    "computers & network": "electronics", "paper+ board": "paper & cardboard",
+    "cardboard": "paper & cardboard", "minerals": "construction materials",
+    "wastewater treatment": "isic:3700", "compressed air": "mechanical engineering",
+    "mechanical": "mechanical engineering", "pipeline": "isic:4930", "recycling": "isic:3830",
+    "flooring": "building components", "building processes": "construction processes",
+    "power plants": "isic:3510",
+}
+# BAFU "fuels / <sub>": EcoSpold01 main category by fuel
+BAFU_FUELS = {"natural gas": "natural gas", "uranium": "nuclear power", "oil": "oil",
+              "biomass": "biomass", "wood": "wood energy", "hard coal": "hard coal",
+              "lignite": "lignite", "synthetic": "isic:1920", "hydrogen": "isic:2011"}
 
 # Resource flows left out of the material anchor (kg, but not extracted material)
-MATERIAL_EXCLUDE = ("Carbon dioxide", "Oxygen", "Nitrogen, in air")
+MATERIAL_EXCLUDE = ("carbon dioxide", "oxygen", "nitrogen, in air")  # lower case
 
 # Several ISIC codes map to many Exiobase sectors (e.g. 3510 -> all electricity
 # technologies). Activities are assigned by the first matching keyword on
@@ -131,6 +162,7 @@ COUNTRY_ALIASES = {
 # ---------------------------------------------------------------------------
 def read_cell(path, key):
     """Read a MATLAB v7.3 cell array of strings."""
+    import h5py
     with h5py.File(path) as f:
         return ["".join(map(chr, f[r][()].ravel())) for r in f[key][()].ravel()]
 
@@ -151,6 +183,7 @@ def load_rex_labels(label_dir):
 
 def load_q_rex(rex_dir, n_ext, n_cols):
     """Load Q_REX as (extensions, country x sector), whatever the stored orientation."""
+    import h5py
     path = find_file(rex_dir, "Q_REX")
     try:
         with h5py.File(path) as f:
@@ -251,11 +284,26 @@ def country_regions(countries, s2):
 
 
 # ---------------------------------------------------------------------------
-# ecoinvent pools
+# Flows and pools
 # ---------------------------------------------------------------------------
+def norm_categories(cats):
+    """ecoinvent-style (compartment, subcompartment) for ecoinvent and EF 3.x flows."""
+    cats = tuple(c for c in cats if c) or ("",)
+    top = cats[0].lower()
+    if top == "emissions" and len(cats) > 1:
+        comp = cats[1].lower().replace("emissions to ", "")
+        return (comp, cats[2] if len(cats) > 2 else "")
+    if top == "resources" and len(cats) > 1:
+        sub = {"resources from ground": "in ground", "resources from water": "in water",
+               "resources from air": "in air", "resources from biosphere": "biotic"}
+        return ("natural resource", sub.get(cats[1].lower(), cats[1]))
+    if top == "land use":
+        return ("natural resource", "land")
+    return (top, cats[1] if len(cats) > 1 else "")
+
+
 def flow_anchor(categories, name, unit):
-    comp = categories[0]
-    sub = categories[1] if len(categories) > 1 else ""
+    comp, sub = norm_categories(categories)
     if comp == "water":
         return "water"
     if comp == "soil":
@@ -263,87 +311,63 @@ def flow_anchor(categories, name, unit):
     if comp == "natural resource":
         if sub == "land":
             return "land"
-        if name.startswith("Water") and unit == "cubic meter":
+        if "water" in name.lower() and unit == "cubic meter":
             return "water"
         return "material"
     return "ghg"
 
 
-def ecoinvent_pools(project, database, isic_to_exio, code_index, loc_region, regions):
-    """Annual flow totals and anchor totals per (sector, pool).
+def flow_meta(key, node):
+    cats = tuple(node.get("categories") or ("",))
+    unit = node.get("unit", "")
+    return {"key": key, "name": node["name"], "categories": cats,
+            "compartment": "/".join(norm_categories(cats)).rstrip("/"), "unit": unit,
+            "anchor": flow_anchor(cats, node["name"], unit)}
 
-    Pools: one per Exiobase region (index as in `regions`) + global (last).
-    Returns flows (list of biosphere keys + metadata), E (n_flows, n_sectors, n_pools),
-    A (n_anchors, n_sectors, n_pools), n_acts (n_sectors, n_pools).
-    """
-    import bw2data as bd
-    import bw2calc as bc
-    from bw2data.backends.peewee import ActivityDataset, ExchangeDataset
 
-    bd.projects.set_current(project)
-    db = bd.Database(database)
-
-    pv = {}
-    for ex in ExchangeDataset.select().where(
-        (ExchangeDataset.output_database == database) & (ExchangeDataset.type == "production")
-    ):
-        pv[(database, ex.output_code)] = ex.data.get("production volume") or 0.0
-
-    lca = bc.LCA({next(iter(db)): 1}, GHG_METHOD)
-    lca.load_lci_data()
-    lca.load_lcia_data()
-    B = lca.biosphere_matrix.tocsc()
-    diag = np.abs(lca.technosphere_matrix.diagonal())  # waste treatments: -1
-    cf = np.asarray(lca.characterization_matrix.diagonal()).ravel()
-
-    rev_bio = {v: k for k, v in lca.biosphere_dict.items()}
-    flows = []
-    for i in range(B.shape[0]):
-        fl = bd.get_activity(rev_bio[i])
-        cats = tuple(fl.get("categories") or ("",))
-        flows.append({"key": rev_bio[i], "code": rev_bio[i][1], "name": fl["name"],
-                      "compartment": "/".join(cats), "unit": fl.get("unit", ""),
-                      "anchor": flow_anchor(cats, fl["name"], fl.get("unit", ""))})
-    names = [f["name"] for f in flows]
-    cats0 = [f["compartment"].split("/") for f in flows]
-    occ = np.array([c[0] == "natural resource" and len(c) > 1 and c[1] == "land"
-                    and n.startswith("Occupation") for c, n in zip(cats0, names)], float)
-    # water consumption = withdrawals - releases to water (ecoinvent water balance)
-    w_in = np.array([f["anchor"] == "water" and c[0] == "natural resource" and n != "Water, in air"
-                     for c, n, f in zip(cats0, names, flows)], float)
-    w_out = np.array([c[0] == "water" and n == "Water" for c, n in zip(cats0, names)], float)
+def anchor_vectors(flows):
+    """Row vectors that turn a biosphere column into the non-GHG anchors."""
+    comp = [norm_categories(f["categories"]) for f in flows]
+    occ = np.array([c == ("natural resource", "land") and f["unit"] == "square meter-year"
+                    for c, f in zip(comp, flows)], float)
+    # water consumption = withdrawals - releases to water (water balance)
+    w_in = np.array([f["anchor"] == "water" and c[0] == "natural resource" and c[1] != "in air"
+                     and f["name"] != "Water, in air" for c, f in zip(comp, flows)], float)
+    w_out = np.array([c[0] == "water" and f["name"] == "Water" for c, f in zip(comp, flows)], float)
     mat = np.array([f["anchor"] == "material" and f["unit"] == "kilogram"
-                    and not n.startswith(MATERIAL_EXCLUDE) for f, n in zip(flows, names)], float)
+                    and not f["name"].lower().startswith(MATERIAL_EXCLUDE) for f in flows], float)
+    return occ, w_in, w_out, mat
 
+
+def accumulate(records, B, diag, cf, flows, loc_region, regions, weighting):
+    """Pool activities per (sector, region pool + global).
+
+    records: iterable of (column, location, sector indices, production volume).
+    weighting 'pv': annual flows (per unit * production volume);
+    weighting 'ghg': each activity normalised to 1 kg CO2-eq direct GHG (equal weights).
+    Returns E (n_flows, n_sectors, n_pools), A (n_anchors, ...), n_acts, n_pos.
+    """
+    occ, w_in, w_out, mat = anchor_vectors(flows)
     n_pool = len(regions) + 1
     reg_index = {r: i for i, r in enumerate(regions)}
     E = np.zeros((B.shape[0], N_SECTORS, n_pool))
     A = np.zeros((len(ANCHORS), N_SECTORS, n_pool))
     n_acts = np.zeros((N_SECTORS, n_pool), int)
     n_pos = np.zeros((len(ANCHORS), N_SECTORS, n_pool), int)  # activities with anchor > 0
-    anchor_names = list(ANCHORS)
+    factors = np.array([v[1] for v in ANCHORS.values()])
 
-    for rec in ActivityDataset.select().where(ActivityDataset.database == database):
-        d = rec.data
-        if d.get("activity type") != "ordinary transforming activity":
+    for j, location, secs, pv in records:
+        if not secs or diag[j] == 0:
             continue
-        isic = dict(d.get("classifications") or []).get("ISIC rev.4 ecoinvent")
-        text = f"{d.get('name', '')} | {d.get('reference product', '')}"
-        secs = isic_sectors(isic, isic_to_exio, code_index, text) if isic else []
-        scale = pv.get((database, rec.code), 0.0)
-        j = lca.activity_dict[(database, rec.code)]
-        if not secs or scale <= 0 or diag[j] == 0:
+        col = B[:, j].toarray().ravel() / diag[j]
+        ghg = cf @ col
+        scale = pv if weighting == "pv" else (1 / ghg if ghg > 0 else 0.0)
+        if scale <= 0:
             continue
-        col = B[:, j].toarray().ravel() * (scale / diag[j] / len(secs))
-        anchors = {
-            "ghg": cf @ col,
-            "water": max(w_in @ col - w_out @ col, 0.0),
-            "land": occ @ col,
-            "material": mat @ col,
-        }
-        a_vec = np.array([anchors[k] * ANCHORS[k][1] for k in anchor_names])
+        col *= scale / len(secs)
+        a_vec = factors * np.array([cf @ col, max(w_in @ col - w_out @ col, 0.0), occ @ col, mat @ col])
         pools = [n_pool - 1]
-        r = loc_region.get(rec.location)
+        r = loc_region.get(location)
         if r in reg_index:
             pools.append(reg_index[r])
         for s in secs:
@@ -352,9 +376,139 @@ def ecoinvent_pools(project, database, isic_to_exio, code_index, loc_region, reg
                 A[:, s, p] += a_vec
                 n_pos[:, s, p] += a_vec > 0
                 n_acts[s, p] += 1
-    return flows, E, A, n_acts, n_pos
+    return E, A, n_acts, n_pos
 
 
+def ecoinvent_pools(project, database, isic_to_exio, code_index, loc_region, regions, weighting="pv"):
+    """Pools from ecoinvent 3.x (Brightway 2, bw2calc 1.x): ISIC classification,
+    production volumes, ordinary transforming activities only."""
+    import bw2data as bd
+    import bw2calc as bc
+    from bw2data.backends.peewee import ActivityDataset, ExchangeDataset
+
+    bd.projects.set_current(project)
+    pv = {ex.output_code: ex.data.get("production volume") or 0.0
+          for ex in ExchangeDataset.select().where(
+              (ExchangeDataset.output_database == database) & (ExchangeDataset.type == "production"))}
+
+    lca = bc.LCA({next(iter(bd.Database(database))): 1}, GHG_METHOD)
+    lca.load_lci_data()
+    lca.load_lcia_data()
+    B = lca.biosphere_matrix.tocsc()
+    diag = np.abs(lca.technosphere_matrix.diagonal())  # waste treatments: -1
+    cf = np.asarray(lca.characterization_matrix.diagonal()).ravel()
+    rev_bio = {v: k for k, v in lca.biosphere_dict.items()}
+    flows = [flow_meta(list(rev_bio[i]), bd.get_activity(rev_bio[i])) for i in range(B.shape[0])]
+
+    def records():
+        for rec in ActivityDataset.select().where(ActivityDataset.database == database):
+            d = rec.data
+            if d.get("activity type") != "ordinary transforming activity":
+                continue
+            isic = dict(d.get("classifications") or []).get("ISIC rev.4 ecoinvent")
+            text = f"{d.get('name', '')} | {d.get('reference product', '')}"
+            secs = isic_sectors(isic, isic_to_exio, code_index, text) if isic else []
+            yield lca.activity_dict[(database, rec.code)], rec.location, secs, pv.get(rec.code, 0.0)
+
+    return (flows, *accumulate(records(), B, diag, cf, flows, loc_region, regions, weighting))
+
+
+def ecospold1_bridge(project, database):
+    """EcoSpold01 category -> ISIC counts from ecoinvent 3 classifications."""
+    import bw2data as bd
+    bd.projects.set_current(project)
+    rows = []
+    for a in bd.Database(database):
+        c = dict(a.get("classifications") or [])
+        if "EcoSpold01Categories" in c and "ISIC rev.4 ecoinvent" in c:
+            rows.append((c["EcoSpold01Categories"], c["ISIC rev.4 ecoinvent"].split(":")[0]))
+    return pd.DataFrame(rows, columns=["ecospold1", "isic"]).value_counts().rename("n").reset_index()
+
+
+def bafu_pools(project, database, bridge, isic_to_exio, code_index, loc_region, regions):
+    """Pools from the BAFU LCI database (Brightway 2.5 / bw2calc 2.x, EF 3.1 flows).
+
+    No ISIC and no production volumes: sector via BAFU category -> EcoSpold01 ->
+    most frequent ecoinvent ISIC (+ keyword refinement); activities weighted equally
+    (per kg CO2-eq). Skips obsolete datasets, mixes/markets and infrastructure (unit 'unit').
+    """
+    import bw2data as bd
+    import bw2calc as bc
+
+    bd.projects.set_current(project)
+    db = bd.Database(database)
+    top = bridge.sort_values("n", ascending=False).drop_duplicates("ecospold1")
+    cat_isic = dict(zip(top.ecospold1, top.isic))
+    main = (bridge.assign(main=bridge.ecospold1.str.split("/").str[0])
+            .groupby(["main", "isic"]).n.sum().reset_index()
+            .sort_values("n", ascending=False).drop_duplicates("main"))
+    main_isic = dict(zip(main["main"], main.isic))
+
+    def isic_of(act):
+        m = re.search(r"BAFU category: (.*?)\. Source", act.get("comment") or "")
+        if not m:
+            return None
+        cat, _, sub = m.group(1).partition(" / ")
+        cat, sub = cat.strip(), sub.split(chr(92))[0].strip()
+        if cat == "fuels":
+            alias = next((v for k, v in BAFU_FUELS.items() if m.group(1).lower().find(k) > 0), None)
+        else:
+            alias = BAFU_CATEGORY_ALIAS.get(cat)
+        if alias and alias.startswith("isic:"):
+            return alias[5:]
+        if alias:
+            return cat_isic.get(f"{alias}/{sub}") or main_isic.get(alias)
+        return cat_isic.get(f"{cat}/{sub}") or main_isic.get(cat)
+
+    lca = bc.LCA({next(iter(db)).id: 1}, BAFU_GHG_METHOD)
+    lca.load_lci_data()
+    lca.load_lcia_data()
+    B = lca.biosphere_matrix.tocsc()
+    diag = np.abs(lca.technosphere_matrix.diagonal())
+    cf = np.asarray(lca.characterization_matrix.diagonal()).ravel()
+    rev_bio = {v: k for k, v in lca.dicts.biosphere.items()}
+    flows = []
+    for i in range(B.shape[0]):
+        node = bd.get_node(id=rev_bio[i])
+        flows.append(flow_meta([node["database"], node["code"]], node))
+
+    stats = {"used": 0, "skipped": 0, "no_isic": 0}
+
+    def records():
+        for act in db:
+            text = f"{act['name']} | {act.get('reference product', '')}"
+            if (act.get("sector") == "obsolete" or act.get("unit") == "unit"
+                    or re.search(BAFU_SKIP, text, re.I)):
+                stats["skipped"] += 1
+                continue
+            isic = isic_of(act)
+            if isic is None:
+                stats["no_isic"] += 1
+                continue
+            stats["used"] += 1
+            secs = isic_sectors(isic, isic_to_exio, code_index, text)
+            yield lca.dicts.activity[act.id], act.get("location"), secs, 1.0
+
+    pools = (flows, *accumulate(records(), B, diag, cf, flows, loc_region, regions, "ghg"))
+    print("BAFU activities:", stats)
+    return pools
+
+
+def save_pools(path, pools):
+    flows, E, A, n_acts, n_pos = pools
+    np.savez_compressed(path.with_suffix(".npz"), E=E, A=A, n_acts=n_acts, n_pos=n_pos)
+    json.dump([{**f, "categories": list(f["categories"])} for f in flows],
+              open(path.with_suffix(".json"), "w"))
+
+
+def load_pools(path):
+    z = np.load(path.with_suffix(".npz"))
+    return json.load(open(path.with_suffix(".json"))), z["E"], z["A"], z["n_acts"], z["n_pos"]
+
+
+# ---------------------------------------------------------------------------
+# Ratios and extension
+# ---------------------------------------------------------------------------
 def ratios(flows, E, A, n_acts, n_pos, min_acts=1, min_share=0.5):
     """R[f, s, pool] and the fallback level used per (anchor, sector, pool).
 
@@ -403,8 +557,13 @@ def main():
     ap.add_argument("--rex-dir", help="folder with Q_REX*.mat (e.g. REX3_2022); omit to only build ratios")
     ap.add_argument("--map-dir", required=True, help="folder with mapping files and REX3_Labels")
     ap.add_argument("--label-dir", help="REX3_Labels folder (default: inside --map-dir)")
+    ap.add_argument("--meta", help="meta.json of an earlier run, replaces the REX label files")
+    ap.add_argument("--source", choices=["ecoinvent", "bafu"], default="ecoinvent")
     ap.add_argument("--project", default="default")
     ap.add_argument("--database", default="cutoff391")
+    ap.add_argument("--weighting", choices=["pv", "ghg"], default="pv",
+                    help="ecoinvent: production volume or equal weight per kg CO2-eq (BAFU: always ghg)")
+    ap.add_argument("--bridge", help="ecospold1_isic_bridge.csv (BAFU only; written by ecoinvent runs)")
     ap.add_argument("--min-acts", type=int, default=1, help="min. activities for a regional ratio")
     ap.add_argument("--min-share", type=float, default=0.5,
                     help="min. share of activities with a positive anchor to use that anchor")
@@ -413,15 +572,19 @@ def main():
 
     map_dir, out = Path(args.map_dir), Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
-    label_dir = Path(args.label_dir) if args.label_dir else map_dir
-    if not list(label_dir.rglob("Labels_Q_REX3*.mat")) and (map_dir / "REX3_Labels.zip").exists():
-        import zipfile
-        zipfile.ZipFile(map_dir / "REX3_Labels.zip").extractall(out)
-        label_dir = out
-
-    countries, sectors, q_labels = load_rex_labels(label_dir)
     dicts = pickle.load(open(map_dir / "sector_matching_dicts.pickle", "rb"))
     s2 = pd.read_excel(map_dir / "S2_ecoinvent_region_TO_exiobase_region.xlsx", sheet_name="region_matching")
+
+    if args.meta:
+        meta = json.load(open(args.meta))
+        countries, sectors, q_labels = meta["countries"], meta["sectors"], meta["q_labels"]
+    else:
+        label_dir = Path(args.label_dir) if args.label_dir else map_dir
+        if not list(label_dir.rglob("Labels_Q_REX3*.mat")) and (map_dir / "REX3_Labels.zip").exists():
+            import zipfile
+            zipfile.ZipFile(map_dir / "REX3_Labels.zip").extractall(out)
+            label_dir = out
+        countries, sectors, q_labels = load_rex_labels(label_dir)
 
     codes = rex_sector_codes(sectors, dicts["exio_name_dict"])
     code_index = {c: i for i, c in enumerate(codes)}
@@ -429,13 +592,20 @@ def main():
     regions = sorted(set(c_regions))
     country_pool = [regions.index(r) for r in c_regions]
 
-    cache = out / f"ecoinvent_pools_{args.database}.pkl"
-    if cache.exists():
-        flows, E, A, n_acts, n_pos = pickle.load(open(cache, "rb"))
+    weighting = "ghg" if args.source == "bafu" else args.weighting
+    cache = out / f"pools_{args.database}_{weighting}"
+    if cache.with_suffix(".npz").exists():
+        flows, E, A, n_acts, n_pos = load_pools(cache)
     else:
-        pools = ecoinvent_pools(args.project, args.database, dicts["isic_to_exio"],
-                                code_index, location_regions(s2), regions)
-        pickle.dump(pools, open(cache, "wb"))
+        if args.source == "bafu":
+            bridge = pd.read_csv(args.bridge, dtype={"isic": str})
+            pools = bafu_pools(args.project, args.database, bridge, dicts["isic_to_exio"],
+                               code_index, location_regions(s2), regions)
+        else:
+            pools = ecoinvent_pools(args.project, args.database, dicts["isic_to_exio"],
+                                    code_index, location_regions(s2), regions, weighting)
+            ecospold1_bridge(args.project, args.database).to_csv(out / "ecospold1_isic_bridge.csv", index=False)
+        save_pools(cache, pools)
         flows, E, A, n_acts, n_pos = pools
 
     keep = np.abs(E[:, :, -1]).sum(axis=1) > 0           # flows present in some sector
@@ -443,12 +613,11 @@ def main():
     E = E[keep]
     R, level, a_idx = ratios(flows, E, A, n_acts, n_pos, args.min_acts, args.min_share)
 
-    pd.DataFrame([{k: v for k, v in f.items() if k != "key"} for f in flows]).assign(
+    pd.DataFrame([{k: v for k, v in f.items() if k not in ("key", "categories")} for f in flows]).assign(
         rex_anchor=[q_labels[ANCHORS[f["anchor"]][0]] for f in flows]
-    ).to_csv(out / "F_ecoinvent_REX_flows.csv", index_label="row")
+    ).to_csv(out / "F_REX_flows.csv", index_label="row")
     np.savez_compressed(out / "ratios.npz", R=R, level=level, A=A, n_acts=n_acts)
 
-    pools = regions + ["GLO"]
     cov = []
     for s in range(N_SECTORS):
         row = {"sector": sectors[s], "exio_code": codes[s], "acts_global": n_acts[s, -1],
@@ -460,19 +629,20 @@ def main():
             row[f"{k}_no_ratio"] = bool((lv == 4).all())
         cov.append(row)
     pd.DataFrame(cov).to_csv(out / "sector_coverage.csv", index=False)
-    json.dump({"countries": countries, "country_region": c_regions, "pools": pools,
-               "sectors": sectors, "exio_codes": codes, "anchors": {k: q_labels[v[0]] for k, v in ANCHORS.items()},
-               "ghg_method": GHG_METHOD, "database": args.database},
+    json.dump({"countries": countries, "country_region": c_regions, "pools": regions + ["GLO"],
+               "sectors": sectors, "exio_codes": codes, "q_labels": q_labels,
+               "anchors": {k: q_labels[v[0]] for k, v in ANCHORS.items()},
+               "source": args.source, "database": args.database, "weighting": weighting},
               open(out / "meta.json", "w"), indent=1)
 
-    print(f"{len(flows)} flows, sectors without any ecoinvent activity: {int((n_acts[:, -1] == 0).sum())}")
+    print(f"{len(flows)} flows, sectors without any activity: {int((n_acts[:, -1] == 0).sum())}")
     if args.rex_dir is None:
         print("no --rex-dir given: ratios written, F not built")
         return None
 
     Q = load_q_rex(args.rex_dir, len(q_labels), len(countries) * N_SECTORS)
     F = build_extension(R, level, a_idx, Q, country_pool)
-    sp.save_npz(out / "F_ecoinvent_REX.npz", F)
+    sp.save_npz(out / "F_REX.npz", F)
     print(f"F: {F.shape[0]} flows x {F.shape[1]} country-sectors, {F.nnz} nonzeros")
     return F
 
