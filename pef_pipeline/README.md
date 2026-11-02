@@ -48,6 +48,23 @@ live cattle, meat, cheese (PET tray via the CFF) and whey. Results go to `report
 which stays local. The foreground amounts are illustrative. `ef31_nw.csv` has the EF 3.1 weights, but
 its normalisation factors still need checking against the JRC EF 3.1 package.
 
+## BAFU vs. PEF version of BAFU (food and feed products)
+
+```bash
+python bafu_pef_compare.py
+```
+
+This compares the 16 EF 3.1 categories for the 70 food and feed datasets of `bafu-2026` as published
+against a PEF version with two layers:
+
+- `pest`: pesticide active ingredients emitted to soil are re-routed 90 % soil / 9 % air / 1 % fresh water.
+  This covers 232 substances in 189 datasets.
+- `hm`: negative heavy-metal balances to agricultural soil are set to zero (107 datasets).
+
+Both layers are linear, so the script applies them as score deltas on the BAFU supply vectors and
+writes no copy of the database. Per-product results by layer go to `reports/bafu_pef_compare.csv`,
+which stays local.
+
 ## Using real data
 
 - Background: EF 3.1-compliant datasets where you have them; otherwise ecoinvent.
