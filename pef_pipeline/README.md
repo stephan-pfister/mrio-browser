@@ -65,6 +65,25 @@ Both layers are linear, so the script applies them as score deltas on the BAFU s
 writes no copy of the database. Per-product results by layer go to `reports/bafu_pef_compare.csv`,
 which stays local.
 
+## PEF re-allocation of ecoinvent 3.9.1 dairy processes
+
+```bash
+python ecoinvent_pef_realloc.py
+```
+
+The script runs on `salton sea pef`, a Brightway 2.5 migrated copy of `salton sea`. It uses
+`cutoff391` with EF v3.1.
+
+ecoinvent keeps each co-product's production volume, price and dry mass. Its own allocation is
+the price key; the script checks this and finds a 0.00 % deviation. A new key therefore only
+rescales each co-product column by AF_PEF / AF_economic. The rules:
+
+- Dairy farm, IDF: "milk production, from cow" (RoW, CA-QC, ZA).
+- Dairy plant, dry matter: cheese/whey, yogurt, and the two butter processes.
+
+Results cover 877 food markets (ISIC 01/10/11) plus the 20 re-allocated datasets. They go to
+`reports/ecoinvent_pef_realloc*.csv`, which stays local.
+
 ## Using real data
 
 - Background: EF 3.1-compliant datasets where you have them; otherwise ecoinvent.
