@@ -36,6 +36,18 @@ python run_demo.py
 The demo creates its own project `pef_pipeline_demo` with a toy background and a GWP-only method. All
 numbers are illustrative.
 
+## Run on the `bafu test` project
+
+```bash
+python run_bafu.py
+```
+
+This (re)writes the database `pef-dairy-foreground`: a Swiss dairy chain on `bafu-2026` with the
+`ef-3.1-biosphere`. It computes the 16 EF 3.1 categories (sentier) and the single score for milk,
+live cattle, meat, cheese (PET tray via the CFF) and whey. Results go to `reports/pef_bafu_results.csv`,
+which stays local. The foreground amounts are illustrative. `ef31_nw.csv` has the EF 3.1 weights, but
+its normalisation factors still need checking against the JRC EF 3.1 package.
+
 ## Using real data
 
 - Background: EF 3.1-compliant datasets where you have them; otherwise ecoinvent.
