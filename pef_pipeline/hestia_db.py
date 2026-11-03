@@ -17,7 +17,9 @@ Per HESTIA cycle (functional unit: 1 ha, or the processed amount):
 - on-farm emissions are mapped to EF 3.1 flows; HESTIA background emissions are dropped
   (BAFU supplies the upstream chains)
 - pesticides follow the PEF default: 90 % of the applied active ingredient to agricultural
-  soil, 9 % to air, 1 % to fresh water (HESTIA's own pesticide fate is not used)
+  soil, 9 % to air, 1 % to fresh water (HESTIA's own pesticide fate is not used); active
+  ingredients without an EF flow (unspecified, classes, unknown CAS) are emitted as the cycle's
+  identified mix, or the mix over all cycles where a cycle has none
 - land occupation (site + unused duration) as Arable / Permanent crops, irrigation water as
   ground, river or lake water withdrawal (taken as consumed)
 
@@ -207,6 +209,13 @@ class Lookup:
         return None
 
 
+def pesticide_flows(term, lk):
+    """[(EF flow code, share)] of the PEF 90/9/1 split for an active ingredient given by CAS, or []."""
+    cas = term[4:].lstrip("0") if term.startswith("CAS-") else None
+    flows = [(lk.cas.get((cas, comp)), share) for comp, share in PEF_PESTICIDE] if cas else []
+    return flows if flows and all(f for f, _ in flows) else []
+
+
 def build(cycles, lk):
     """wurst-format datasets (multi-output where HESTIA gives several valued products) and an unmapped log."""
     by_product = defaultdict(dict)
@@ -214,6 +223,11 @@ def build(cycles, lk):
         by_product[c["product"]][c["country"]] = c
     unmapped = defaultdict(lambda: [0, 0.0, ""])
     data = []
+    global_mix = defaultdict(float)
+    for c in cycles:
+        for i in c["inputs"]:
+            if i["type"] == "pesticideAI" and i["value"] and pesticide_flows(i["id"], lk):
+                global_mix[i["id"]] += i["value"]
 
     def miss(term, value, units):
         unmapped[term][0] += 1
@@ -234,6 +248,7 @@ def build(cycles, lk):
                "name": name, "location": loc, "input": (FG, code),
                "properties": {"price": (p["share"] or 100) / p["value"] if p["value"] else 0}}
               for p in products if p["value"]]
+        known, unknown = defaultdict(float), 0.0
         for i in c["inputs"]:
             t, v = i["id"], i["value"]
             if not v:
@@ -246,12 +261,13 @@ def build(cycles, lk):
                            "product": a.get("reference product"), "unit": a["unit"], "location": a["location"]})
             elif i["type"] == "pesticideAI":
                 ex.append(lk.tech(*PESTICIDE[:2], v))
-                cas = t[4:].lstrip("0") if t.startswith("CAS-") else None
-                flows = [(lk.cas.get((cas, comp)), share) for comp, share in PEF_PESTICIDE] if cas else []
-                if flows and all(f for f, _ in flows):
+                flows = pesticide_flows(t, lk)
+                if flows:
                     ex += [{"type": "biosphere", "amount": v * s, "input": (BIO, f)} for f, s in flows]
+                    known[t] += v
                 else:
-                    miss(f"{t} (emission)", v, i["units"])
+                    unknown += v
+                    miss(f"{t} (emission, proxy)", v, i["units"])
             elif t in WATER_RESOURCE:
                 f = lk.flow(WATER_RESOURCE[t], ("Resources", "Resources from water",
                                                 "Renewable material resources from water"))
@@ -272,6 +288,13 @@ def build(cycles, lk):
                 continue
             else:
                 miss(t, v, i["units"])
+        if unknown:
+            # proxy for unidentified active ingredients: the cycle's own identified mix, else the global one
+            mix = known or global_mix
+            total = sum(mix.values())
+            for t, kg in mix.items():
+                ex += [{"type": "biosphere", "amount": unknown * kg / total * s, "input": (BIO, f),
+                        "comment": "PEF pesticide proxy"} for f, s in pesticide_flows(t, lk)]
         for e in c["emissions"]:
             fl = emission_flow(e["id"])
             code_f = lk.flow(fl[0], fl[1], AIR_UNSPEC) if fl else None

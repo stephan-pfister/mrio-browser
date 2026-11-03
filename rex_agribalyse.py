@@ -140,6 +140,31 @@ def ghg(inv, manure_ch4=False):
     return (inv.mul(w, axis=0)).sum(axis=0)
 
 
+def livestock_ratios(zip_path, cache, manure_ch4=False):
+    """R (flows x livestock sectors, per kg CO2-eq anchor GHG) and the products behind it."""
+    procs, tech, bio = extract(zip_path, Path(cache) / "agribalyse_parsed_v2.pkl")
+    inv, targets = farm_inventories(procs, tech, bio)
+    g = ghg(inv, manure_ch4)
+    keep = g > 0
+    inv, targets, g = inv.loc[:, keep], targets[keep.values], g[keep]
+    sector = targets.set_index("id").sector.astype(int)
+    R = inv.T.groupby(sector).sum().T.div(g.groupby(sector).sum(), axis=1)
+    return R, targets.assign(ghg_kg_co2eq=g.values)
+
+
+def scale(R, n_countries, q_ghg):
+    """F (flows x countries*sectors): one global ratio per sector times REX GHG."""
+    rows, cols, vals = [], [], []
+    for s in R.columns:
+        r = R[s].to_numpy()
+        nz = np.nonzero(r)[0]
+        for ci in range(n_countries):
+            q = q_ghg[ci * N_SECTORS + s]
+            if q > 0:
+                rows += list(nz); cols += [ci * N_SECTORS + s] * len(nz); vals += list(r[nz] * q)
+    return sp.csr_matrix((vals, (rows, cols)), shape=(len(R), n_countries * N_SECTORS))
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--zip", required=True, help="openLCA JSON-LD export of Agribalyse 3.2")
@@ -158,26 +183,11 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     meta = json.load(open(args.meta))
     countries = meta["countries"]
-    procs, tech, bio = extract(args.zip, Path(args.cache) / "agribalyse_parsed_v2.pkl")
-    inv, targets = farm_inventories(procs, tech, bio)
-    g = ghg(inv, args.manure_ch4_in_anchor)
-    keep = g > 0
-    inv, targets, g = inv.loc[:, keep], targets[keep.values], g[keep]
-    targets.assign(ghg_kg_co2eq=g.values).to_csv(out / "livestock_products.csv", index=False)
-
-    sector = targets.set_index("id").sector.astype(int)
-    R = inv.T.groupby(sector).sum().T.div(g.groupby(sector).sum(), axis=1)   # flows x sectors
+    R, targets = livestock_ratios(args.zip, args.cache, args.manure_ch4_in_anchor)
+    targets.to_csv(out / "livestock_products.csv", index=False)
     R.to_csv(out / "agribalyse_ratios.csv")
     Q = load_q_rex(args.rex_dir, len(meta["q_labels"]), len(countries) * N_SECTORS)
-    rows, cols, vals = [], [], []
-    for s in R.columns:
-        r = R[s].to_numpy()
-        nz = np.nonzero(r)[0]
-        for ci in range(len(countries)):
-            q = Q[1][ci * N_SECTORS + s]
-            if q > 0:
-                rows += list(nz); cols += [ci * N_SECTORS + s] * len(nz); vals += list(r[nz] * q)
-    F = sp.csr_matrix((vals, (rows, cols)), shape=(len(R), len(countries) * N_SECTORS))
+    F = scale(R, len(countries), Q[1])
     sp.save_npz(out / "F_REX_agribalyse_livestock.npz", F)
     flows = R.index.to_frame(index=False)
     flows.to_csv(out / "F_REX_agribalyse_livestock_flows.csv", index=False)
