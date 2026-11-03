@@ -12,6 +12,8 @@ Brightway databases and compares EF 3.1 results with and without them.
 | `ecoinvent_pef_realloc.py` | PEF re-allocation of dairy co-products, 877 food markets | `salton sea pef` (read only) |
 | `bafu_workbook_check.py` | our BAFU baseline vs. BAFU's published EF 3.1 results | `reports/bafu_pef_compare.csv` + release workbook |
 | `hestia_db.py` | standalone HESTIA crop database on BAFU, PEF allocation | `bafu test`: writes `hestia-2026-04-30` |
+| `export_hestia_db.py` | own project `hestia-bafu-pef` + portable files (Brightway write format, Excel) | writes `reports/hestia_bw/` |
+| `import_hestia_db.py` | writes the portable files into any project, Brightway 2.5 or legacy 2 | any project |
 | `ef31_nw.csv` | EF 3.1 normalisation and weighting factors | normalisation factors not yet verified |
 
 Results go to `reports/`, which stays local because it holds numbers derived from licensed data
@@ -141,6 +143,13 @@ normal dose, which dominates its freshwater ecotoxicity.
 
 Scores per product (`--score`) go to `reports/hestia_ef31_scores.csv`, allocation factors to
 `reports/hestia_allocation.csv`.
+
+**Using it in Activity Browser.** `export_hestia_db.py` creates the project `hestia-bafu-pef`
+(Brightway 2.5, Activity Browser 3) with only the HESTIA database, BAFU, the EF 3.1 biosphere and the 25
+EF 3.1 methods, and writes portable files to `reports/hestia_bw/`. `import_hestia_db.py <project>` loads
+them into any project; run it with the legacy environment for Activity Browser 2 (`hestia-bafu-pef-AB2`
+was made that way). BW2Packages are not used: Brightway 2.5 packages store characterisation factors by
+internal id and do not open in legacy Brightway. A round trip into both versions gives identical scores.
 
 ## Validation
 
