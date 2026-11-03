@@ -15,7 +15,8 @@ Processes "Copied from Ecoinvent" are never part of the farm subsystem; inputs t
 Scaling as in rex_env_extension.py with the GHG anchor and one global pool per sector:
 
     R[f, s] = sum_j g(f, j) / sum_j ghg(j)      j: livestock products of sector s (per unit)
-    F[f, c, s] = R[f, s] x Q_REX[GHG, c, s]
+    F[f, c, s] = R[f, s] x Q_REX[GHG, c, s], then calibrated to EXIOBASE air emissions of the
+    livestock sectors (rex_calibrate.calibrate; flow split from Agribalyse, levels from EXIOBASE)
 
 ghg(j) leaves out manure CH4 (exchange descriptions "feces / storage", or WFLDB manure
 management processes): REX livestock GHG follows EXIOBASE, whose livestock CH4 is enteric.
@@ -38,7 +39,7 @@ import pandas as pd
 import scipy.sparse as sp
 import scipy.sparse.linalg as spla
 
-from rex_calibrate import POLLUTANTS, load_exiobase
+from rex_calibrate import POLLUTANTS, calibrate, load_exiobase
 from rex_env_extension import N_SECTORS, load_q_rex
 from rex_hestia import sector_totals
 
@@ -182,14 +183,24 @@ def main():
     flows.to_csv(out / "F_REX_agribalyse_livestock_flows.csv", index=False)
 
     dicts = pickle.load(open(Path(args.map_dir) / "sector_matching_dicts.pickle", "rb"))
-    _, exio = load_exiobase(args.exio, dicts["exio_name_dict"], meta["exio_codes"])
+    regions, exio = load_exiobase(args.exio, dicts["exio_name_dict"], meta["exio_codes"])
     secs = list(LIVESTOCK_SECTORS)
-    long = []
     air = flows.category.str.contains("air", case=False)
+
+    # calibration as in rex_calibrate.py, restricted to the livestock sectors this extension covers
+    exio_ls = {p: np.where(np.isin(np.arange(N_SECTORS), secs), x, 0.0) for p, x in exio.items()}
+    cflows = pd.DataFrame({"name": flows.name, "compartment": np.where(air, "air", "other")})
+    Fc, cells = calibrate(F, cflows, meta["country_region"], regions, exio_ls, Q[1])
+    sp.save_npz(out / "F_REX_agribalyse_livestock_calibrated.npz", Fc)
+    cells.assign(sector=[meta["sectors"][s] for s in cells.sector] if len(cells) else []).to_csv(
+        out / "calibration_cells.csv", index=False)
+
+    long = []
     for p, (_, pat) in POLLUTANTS.items():
+        sel = np.where(air & flows.name.str.match(pat, case=False))[0]
         res = {"EXIOBASE": exio[p][:, secs].sum(axis=0),
-               "Agribalyse": sector_totals(F, np.where(air & flows.name.str.match(pat, case=False))[0],
-                                           len(countries), secs)}
+               "Agribalyse": sector_totals(F, sel, len(countries), secs),
+               "Agribalyse calibrated": sector_totals(Fc, sel, len(countries), secs)}
         for run in args.compare:
             fl = pd.read_csv(Path(run) / "F_REX_flows.csv")
             Fr = sp.load_npz(Path(run) / "F_REX.npz").tocsr()
