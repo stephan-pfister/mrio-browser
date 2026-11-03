@@ -17,6 +17,10 @@ Scaling as in rex_env_extension.py with the GHG anchor and one global pool per s
     R[f, s] = sum_j g(f, j) / sum_j ghg(j)      j: livestock products of sector s (per unit)
     F[f, c, s] = R[f, s] x Q_REX[GHG, c, s]
 
+ghg(j) leaves out manure CH4 (exchange descriptions "feces / storage", or WFLDB manure
+management processes): REX livestock GHG follows EXIOBASE, whose livestock CH4 is enteric.
+Manure CH4 is still an emission flow of the extension.
+
     python rex_agribalyse.py --zip <openLCA JSON-LD export> --cache <folder>
         --rex-dir <REX3_2022> --exio <EXIOBASE F.txt> --map-dir <mapping folder>
         --meta <extension meta.json> --compare <run> ... --out <out dir>
@@ -52,6 +56,7 @@ FARM_NODE = re.compile(r"enteric|manure management|manure, |slurry|housing|grazi
 NOT_FARM = re.compile(r"feed|fodder|forage|silage|\bhay\b|concentrate|ration|basket|Copied from Ecoinvent"
                       r"|processed in|at plant|at slaughter|at supermarket|at consumer|packaging", re.I)
 MASS = {"kg": 1.0, "g": 1e-3, "mg": 1e-6, "µg": 1e-9, "ug": 1e-9, "ng": 1e-12, "t": 1e3, "ton": 1e3}
+MANURE_CH4 = re.compile(r"feces|faeces|manure|excret|stockage|storage", re.I)
 GWP = [(r"^dinitrogen monoxide$|^nitrous oxide$", 273.0), (r"^methane, fossil", 29.8),
        (r"^methane(, biogenic|, non-fossil)?$", 27.0), (r"^carbon dioxide, fossil", 1.0)]
 
@@ -87,7 +92,8 @@ def extract(zip_path, cache):
                 unit = (e.get("unit") or {}).get("name", "")
                 bio.append({"process": p["@id"], "name": f["name"], "category": f.get("category", ""),
                             "unit": "kg" if unit in MASS else unit,
-                            "amount": amount * MASS.get(unit, 1.0) * (-1 if e.get("isInput") else 1)})
+                            "amount": amount * MASS.get(unit, 1.0) * (-1 if e.get("isInput") else 1),
+                            "description": (e.get("description") or "")[:200]})
             elif e.get("isInput"):
                 tech.append({"process": p["@id"], "flow": f["@id"], "amount": amount})
     data = pd.DataFrame(procs), pd.DataFrame(tech), pd.DataFrame(bio)
@@ -106,11 +112,15 @@ def farm_inventories(procs, tech, bio):
     t = tech[tech.process.isin(idx) & tech.flow.isin(provider)]
     A = sp.csc_matrix((t.amount, ([idx[provider[f]] for f in t.flow], [idx[p] for p in t.process])),
                       shape=(len(nodes), len(nodes)))
-    b = bio[bio.process.isin(idx)]
-    keys = b[["name", "category", "unit"]].drop_duplicates().reset_index(drop=True)
+    b = bio[bio.process.isin(idx)].copy()
+    # manure CH4 is kept as an emission but not counted in the anchor (REX/EXIOBASE livestock GHG is enteric)
+    manure_proc = set(nodes.id[nodes.name.str.contains(r"manure management", case=False)])
+    b["part"] = np.where(b.name.str.match(r"methane", case=False)
+                         & (b.description.str.contains(MANURE_CH4) | b.process.isin(manure_proc)), "manure", "")
+    keys = b[["name", "category", "unit", "part"]].drop_duplicates().reset_index(drop=True)
     kidx = {tuple(k): i for i, k in enumerate(keys.itertuples(index=False))}
-    B = sp.csr_matrix((b.amount, ([kidx[k] for k in zip(b.name, b.category, b.unit)], [idx[p] for p in b.process])),
-                      shape=(len(keys), len(nodes)))
+    B = sp.csr_matrix((b.amount, ([kidx[k] for k in zip(b.name, b.category, b.unit, b.part)],
+                                  [idx[p] for p in b.process])), shape=(len(keys), len(nodes)))
     D = np.zeros((len(nodes), len(targets)))
     D[[idx[p] for p in targets.id], np.arange(len(targets))] = 1.0
     X = spla.spsolve((sp.identity(len(nodes), format="csc") - A), D)
@@ -118,9 +128,11 @@ def farm_inventories(procs, tech, bio):
     return pd.DataFrame(G, index=pd.MultiIndex.from_frame(keys), columns=targets.id), targets
 
 
-def ghg(inv):
+def ghg(inv, manure_ch4=False):
+    """IPCC 2021 GWP100 per product; manure CH4 only counted if manure_ch4."""
     names = inv.index.get_level_values("name").str.lower()
-    air = inv.index.get_level_values("category").str.contains("air", case=False)
+    air = (inv.index.get_level_values("category").str.contains("air", case=False)
+           & (manure_ch4 | (inv.index.get_level_values("part") != "manure")))
     w = np.zeros(len(inv))
     for pat, gwp in GWP:
         w = np.where((w == 0) & air & names.str.match(pat), gwp, w)
@@ -136,6 +148,8 @@ def main():
     ap.add_argument("--map-dir", required=True)
     ap.add_argument("--meta", required=True)
     ap.add_argument("--compare", nargs="*", default=[])
+    ap.add_argument("--manure-ch4-in-anchor", action="store_true",
+                    help="count manure CH4 in the anchor GHG (default: enteric CH4 only)")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
 
@@ -143,9 +157,9 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     meta = json.load(open(args.meta))
     countries = meta["countries"]
-    procs, tech, bio = extract(args.zip, Path(args.cache) / "agribalyse_parsed.pkl")
+    procs, tech, bio = extract(args.zip, Path(args.cache) / "agribalyse_parsed_v2.pkl")
     inv, targets = farm_inventories(procs, tech, bio)
-    g = ghg(inv)
+    g = ghg(inv, args.manure_ch4_in_anchor)
     keep = g > 0
     inv, targets, g = inv.loc[:, keep], targets[keep.values], g[keep]
     targets.assign(ghg_kg_co2eq=g.values).to_csv(out / "livestock_products.csv", index=False)
