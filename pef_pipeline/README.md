@@ -27,6 +27,7 @@ Results go to `reports/`, which stays local because it holds numbers derived fro
 |---|---|---|---|
 | Pesticides to 90 % soil / 9 % air / 1 % fresh water | `bafu_pef_compare.py` | bafu-2026: 232 active ingredients, 189 datasets | Pyraclostrobin stays in soil: no air or water flow in the EF biosphere. |
 | No negative heavy-metal balances to soil | `bafu_pef_compare.py` | bafu-2026: 107 datasets | Judgement call; PEF does not state it explicitly. |
+| Water use with country-level factors | `bafu_pef_compare.py` (layer `water`) | bafu-2026: 650 datasets | Country factors from the JRC EF 3.1 CF file; regions without one (RER, GLO …) keep the global factor. |
 | Dairy farm, IDF biophysical allocation: AF_milk = 1 − 6.04 · M_meat / M_milk | `rule_dairy_farm`, `ecoinvent_pef_realloc.py` | ecoinvent milk production (RoW, CA-QC, ZA); foreground demos | ecoinvent milk is raw milk, not FPCM. |
 | Dairy plant, allocation by dry matter (PEFCR dairy) | `rule_physical`, `ecoinvent_pef_realloc.py` | ecoinvent cheese, yogurt, butter | — |
 | EF 3.1 characterisation, 16 categories | all scripts | sentier EF v3.1 (BAFU), ecoinvent EF v3.1 | Sub-indicators are excluded so nothing is counted twice. |
@@ -43,7 +44,7 @@ Results go to `reports/`, which stays local because it holds numbers derived fro
 | Small-ruminant default allocation | ecoinvent "sheep production, for meat" (meat vs. wool) not covered yet. |
 | Slaughterhouse defaults on real data | No multi-output slaughterhouse in BAFU or ecoinvent. |
 | Re-allocation of BAFU | bafu-2026 has no prices, production volumes or properties; its allocation rules are in the LCI reports of the documentation component. |
-| Country-specific factors (water use, acidification, eutrophication) | The sentier EF 3.1 method ships only the global factors. |
+| Country-specific factors for acidification and eutrophication | The sentier EF 3.1 method ships only global factors; water use is regionalised by the `water` layer. |
 | Long-term emissions | Whether PEF excludes them still needs checking. |
 | Rice CH₄, drained peat, LUC within 20 years, biodiversity reporting | Need new activity data, not a rule. |
 | Climate change split into fossil, biogenic and LUC | Reporting only; the sub-indicators exist but are not reported. |
@@ -109,10 +110,13 @@ python bafu_workbook_check.py "<path>/BAFU-2026 v1 LCIA Results_corrected.xlsx"
 
 ## Main results
 
-**BAFU vs. PEF version (70 food and feed products).** Only the toxicity categories change.
-Freshwater ecotoxicity rises for 66 products (median ×1.32, 20 products more than doubled, asparagus
-×40–119 from deltamethrin in the seedlings). Human toxicity changes for 35–38 products, mainly through
-the heavy-metal layer, and all 23 negative toxicity results disappear. Single score: median +1.2 %.
+**BAFU vs. PEF version (70 food and feed products, against the corrected baseline).** Only toxicity
+and water use change. Freshwater ecotoxicity rises for 63 products (median ×1.32, 20 products more
+than doubled, asparagus ×40–119 from deltamethrin in the seedlings). Human toxicity changes for 29–35
+products, mainly through the heavy-metal layer, and all 23 negative toxicity results disappear. The
+`water` layer changes water use for 65 products (median ×1.04; green beans CH ×0.035, palm MY ×0.08,
+sorghum CN ×0.09). Single score: median +0.9 %, 12 products up more than 10 %, 4 more than doubled,
+and down to ×0.56 where water use falls.
 
 **ecoinvent re-allocation.** About 30 of 893 products change, in all 16 categories together.
 Climate change per kg: whey ×10.0, fresh cheese ×0.30, buttermilk ×0.40, butter ×1.20, cow milk ×0.97,
@@ -163,29 +167,34 @@ acidification, eutrophication and water use, which the sentier method does not i
 ### Our BAFU baseline vs. BAFU's published EF 3.1 results
 
 `bafu_workbook_check.py` compares the baseline of `bafu_pef_compare.py` with
-`BAFU-2026 v1 LCIA Results_corrected.xlsx` for the 70 products (all present in the workbook):
+`BAFU-2026 v1 LCIA Results_corrected.xlsx` for the 70 products (all present in the workbook). The
+baseline includes one correction of the Brightway import (`fix`): unspecified chromium emitted to soil
+and water is mapped to Cr(III), as BAFU's own EF mapping does (731 datasets).
 
-| Category | Ours / published (median) | Within 1 % | Cause of the difference |
-|---|---|---|---|
-| Climate change, acidification, eutrophication, PM, ozone, radiation, photochemical ozone, resources | 1.000 | 67–69 of 69 | — |
-| Human toxicity, non-cancer | 1.000 | 64 of 69 | small |
-| Human toxicity, cancer | 1.69 (0.14–8) | 1 of 69 | Unspecified chromium gets the carcinogenic factor in the Brightway import, not in BAFU's mapping (sunflower ×126, 93 % chromium). |
-| Freshwater ecotoxicity | 1.00 (0.69–1.14) | 31 of 69 | Flows characterised in BAFU's mapping but not in the import (rape oil ×0.11, cereals ×0.67–0.72). |
-| Land use | 1.00 (up to ×6) | 43 of 69 | Land transformation "To / From Arable" nearly cancel; a small mapping difference gives ×5–6 for organic and extensive cereals. |
-| Water use | 1.05 (up to ×29) | 6 of 69 (63 within 10 %) | Turbine water and released water both characterised (±43 m³/m³) and nearly cancel; global instead of Swiss factor for CH irrigation. |
+| Category | Within 1 % / 10 %, import as is | With the chromium fix | Median ours / published | Remaining cause |
+|---|---|---|---|---|
+| Climate change, acidification, eutrophication, PM, ozone, radiation, photochemical ozone, resources | 67–69 / 68–69 of 69 | unchanged | 1.000 | — |
+| Human toxicity, non-cancer | 64 / 69 | unchanged | 1.000 | small |
+| Human toxicity, cancer | 1 / 7 | **4 / 31** | 1.70 → **1.08** | Other flows (sunflower still ×8.6; sorghum CN sign differs). |
+| Freshwater ecotoxicity | 31 / 47 | **40 / 53** | 1.00 → 0.99 | Flows characterised in BAFU's mapping but not in the import (rape oil ×0.10). |
+| Land use | 43 / 51 | unchanged | 1.00 | Land transformation "To / From Arable" nearly cancel; ×5–6 for organic and extensive cereals. |
+| Water use | 6 / 63 | unchanged | 1.05 | Turbine water and released water both characterised (±43 m³/m³) and nearly cancel; green beans CH ×29. |
 
 Whey is left out: BAFU gives it no burden, so both values are about zero.
 
+**Water use is not part of the fix.** Country factors for every dataset (the `water` layer) make
+asparagus PE and MX and green beans KE match BAFU exactly, but lower agreement overall from 63 to 27
+products within 10 % (palm MY, sorghum CN drop to ×0.08). BAFU regionalises water only in some
+datasets, which the Brightway import does not show. Country-level water use is a PEF requirement, so
+it is a PEF layer instead.
+
 **What it means.** The baselines behind the main PEF findings match: asparagus (CH, MX, PE) and
 soybeans BR within 0.2 % for freshwater ecotoxicity. The BAFU and PEF versions use the same import,
-so the PEF ratios hold. Absolute toxicity levels, and land and water use for some cereals and
-vegetables, differ from BAFU's published numbers.
+so the PEF ratios hold. Land use for organic and extensive cereals and water use for some vegetables
+still differ from BAFU's published numbers.
 
-**Possible import fixes**, which would also apply to the sentier loader:
-
-- map unspecified chromium as BAFU does, most likely as Cr(III);
-- set turbine water to zero on both sides;
-- use the Swiss water-use factor for CH irrigation, from the JRC country-specific factors.
+**Still open in the import** (would also apply to the sentier loader): turbine water, the remaining
+ecotoxicity flows (rape oil), and land transformation.
 
 ## Open points
 

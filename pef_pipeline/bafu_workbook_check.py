@@ -62,15 +62,20 @@ def main(path):
 
     ours = ours[ours.key.isin(published)].copy()
     ours["published"] = [published[k][c] for k, c in zip(ours.key, ours.category)]
-    ours["ratio"] = ours.BAFU / ours.published.replace(0, np.nan)
-    ours[["product", "location", "category", "unit", "BAFU", "published", "ratio"]].to_csv(OUT, index=False)
+    ours = ours[abs(ours.published) > 1e-9 * ours.groupby("category").published.transform(lambda p: abs(p).max())]
+    ours["ratio"] = ours.BAFU / ours.published
+    ours["ratio_raw"] = ours.BAFU_raw / ours.published
+    ours[["product", "location", "category", "unit", "BAFU_raw", "BAFU", "published", "ratio_raw", "ratio"]] \
+        .to_csv(OUT, index=False)
 
-    print(f"\nours / published per category (median, 5th-95th percentile, products within 1 % / 10 %) -> {OUT}")
+    print(f"\nours / published per category: products within 1 % / 10 %, median; "
+          f"without -> with the import correction -> {OUT}")
     for c in COLUMNS:
-        r = ours.loc[ours.category == c, "ratio"].dropna()
-        print(f"  {c:<45} {r.median():7.3f}  {r.quantile(.05):7.3f}-{r.quantile(.95):<8.3f}"
-              f" {int((abs(r - 1) <= .01).sum()):3d} / {int((abs(r - 1) <= .1).sum()):3d} of {len(r)}")
-    worst = ours.dropna(subset=["ratio"]).assign(dev=lambda d: abs(np.log(abs(d.ratio))))
+        x = ours[ours.category == c]
+        stats = [(int((abs(r - 1) <= .01).sum()), int((abs(r - 1) <= .1).sum()), r.median())
+                 for r in (x.ratio_raw, x.ratio)]
+        print(f"  {c:<45} " + "  ->  ".join(f"{a:3d} / {b:3d}  {m:6.3f}" for a, b, m in stats) + f"   of {len(x)}")
+    worst = ours.assign(dev=lambda d: abs(np.log(abs(d.ratio))))
     print("\nLargest deviations:")
     print(worst.sort_values("dev", ascending=False).head(15)[["key", "category", "BAFU", "published", "ratio"]]
           .to_string(index=False, float_format=lambda v: f"{v:.4g}"))
