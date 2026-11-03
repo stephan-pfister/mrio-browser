@@ -145,10 +145,10 @@ def build(R, countries, Q_ghg):
     return F, flows, pd.DataFrame(used)
 
 
-def crop_totals(F, select, n_countries):
-    """Per crop sector (0..7) sum of the selected rows, kg."""
+def sector_totals(F, select, n_countries, sectors=range(8)):
+    """Per sector (default: crop sectors 0..7) sum of the selected rows over all countries, kg."""
     x = np.asarray(F[select].sum(axis=0)).ravel().reshape(n_countries, N_SECTORS)
-    return x[:, :8].sum(axis=0)
+    return x[:, list(sectors)].sum(axis=0)
 
 
 def main():
@@ -183,13 +183,13 @@ def main():
         sp_name = [k for k, v in SPECIES.items() if v == p]
         row = {"pollutant": p, "EXIOBASE": exio[p][:, :8].sum(axis=0)}
         if sp_name:
-            row["HESTIA"] = crop_totals(F, [i for i, f in enumerate(flows) if f == f"{sp_name[0]} to air"],
+            row["HESTIA"] = sector_totals(F, [i for i, f in enumerate(flows) if f == f"{sp_name[0]} to air"],
                                         len(countries))
         for run in args.compare:
             fl = pd.read_csv(Path(run) / "F_REX_flows.csv")
             Fr = sp.load_npz(Path(run) / "F_REX.npz").tocsr()
             sel = np.where(fl.compartment.str.startswith("air") & fl.name.str.match(POLLUTANTS[p][1], case=False))[0]
-            row[Path(run).name.replace("out_", "").replace("_final", "") + " raw"] = crop_totals(Fr, sel, len(countries))
+            row[Path(run).name.replace("out_", "").replace("_final", "") + " raw"] = sector_totals(Fr, sel, len(countries))
         table.append(row)
     long = []
     for row in table:
