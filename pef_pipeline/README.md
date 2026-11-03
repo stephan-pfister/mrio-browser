@@ -11,6 +11,7 @@ Brightway databases and compares EF 3.1 results with and without them.
 | `bafu_pef_compare.py` | BAFU vs. PEF version for 70 food and feed products | `bafu test` (read only) |
 | `ecoinvent_pef_realloc.py` | PEF re-allocation of dairy co-products, 877 food markets | `salton sea pef` (read only) |
 | `bafu_workbook_check.py` | our BAFU baseline vs. BAFU's published EF 3.1 results | `reports/bafu_pef_compare.csv` + release workbook |
+| `hestia_db.py` | standalone HESTIA crop database on BAFU, PEF allocation | `bafu test`: writes `hestia-2026-04-30` |
 | `ef31_nw.csv` | EF 3.1 normalisation and weighting factors | normalisation factors not yet verified |
 
 Results go to `reports/`, which stays local because it holds numbers derived from licensed data
@@ -114,6 +115,32 @@ the heavy-metal layer, and all 23 negative toxicity results disappear. Single sc
 **ecoinvent re-allocation.** About 30 of 893 products change, in all 16 categories together.
 Climate change per kg: whey ×10.0, fresh cheese ×0.30, buttermilk ×0.40, butter ×1.20, cow milk ×0.97,
 cattle for slaughter ×1.02. Knock-on: red meat ×1.01–1.10, feed and chicken ×0.97.
+
+## HESTIA database on BAFU (`hestia_db.py`)
+
+`hestia-2026-04-30` holds the HESTIA aggregated release 2026-04-30 (CC-BY 4.0) as Brightway
+datasets: 367 crop and processed-crop cycles (latest period per product and country, 48 countries),
+683 datasets after allocation. It links only to `bafu-2026` and `ef-3.1-biosphere`, so the system
+contains no ecoinvent.
+
+| Part | Modelling |
+|---|---|
+| Products | All products with an economic value share; 190 multi-output cycles (grain + straw, oil + meal, rice milling) split by `split_multioutput`, rule `crop` (economic, LEAP) or `economic` for processing. Co-products under 0.5 % of the main product's mass (intercrop artefacts of the aggregation) are dropped. |
+| Inputs | Fertilisers per nutrient, diesel/petrol/LPG/fuel oil/natural gas as supply only (HESTIA carries the combustion emissions), grid electricity by country ("Electricity mix", GLO fallback), machinery, lime, tap water, processing chemicals → bafu-2026. Seed and crop inputs of processing cycles → HESTIA datasets. Manure and compost: no burden (residues). |
+| Emissions | HESTIA on-farm emissions → EF 3.1 (non-urban air, fresh water). Fossil vs. biogenic vs. land-use-change CO₂/CH₄/CO split by emission source; dLUC, drained organic soils and vegetation burning count as land use change. HESTIA background emissions are dropped. |
+| Pesticides | PEF default: 90 % of the applied active ingredient to agricultural soil, 9 % to air, 1 % to fresh water, matched by CAS; plus "Pesticide unspecified" production per kg AI. |
+| Land, water | Occupation (site + unused duration) as Arable, Arable irrigated or Permanent crops; irrigation withdrawals as ground, river or lake water, taken as consumed. |
+
+**Gaps** (`reports/hestia_unmapped.csv`): pesticides reported only as unspecified, herbicide,
+insecticide or fungicide (about 1 t AI over all cycles), 75 named active ingredients without an EF
+flow, PM10/TSP/black carbon (no EF factor), coal, wood fuel, sulphur, gypsum, branded NPK products,
+saplings and seedlings (counted in pieces).
+
+**Data issue:** HESTIA's almond cycle for Spain reports 4 kg/ha deltamethrin, roughly 200 times a
+normal dose, which dominates its freshwater ecotoxicity.
+
+Scores per product (`--score`) go to `reports/hestia_ef31_scores.csv`, allocation factors to
+`reports/hestia_allocation.csv`.
 
 ## Validation
 
