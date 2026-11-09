@@ -6,11 +6,15 @@ sub-processes (enteric fermentation, manure management, housing), not as direct
 exchanges. The on-farm inventory of each livestock product is therefore the biosphere of
 its farm subsystem:
 
-    farm nodes: livestock processes plus enteric / manure / housing / grazing sub-processes
-    g = B_farm (I - A_farm)^-1 e_product      feed, energy and background are cut off
+    farm nodes: livestock processes plus enteric / manure / housing / excretion / grazing
+                sub-processes and grazed grass (pasture)
+    g = B_farm (I - A_farm)^-1 e_product      feed, crops, energy and background are cut off
 
-Processes "Copied from Ecoinvent" are never part of the farm subsystem; inputs that
-"Adapted from WFLDB" farm sub-processes carry are included like Agribalyse's own.
+Crops, harvested forage (hay, silage, baled grass), straw, compost and the "on-farm part" /
+"purchased part" feed processes are neither farm nodes nor livestock products, even when their
+names carry animal words. Technosphere amounts are converted to the provider's reference unit
+(kg / t / g). Processes "Copied from Ecoinvent" are never part of the farm subsystem; inputs
+that "Adapted from WFLDB" farm sub-processes carry are included like Agribalyse's own.
 
 Scaling as in rex_env_extension.py with the GHG anchor and one global pool per sector:
 
@@ -55,7 +59,9 @@ SECTOR_RULES = [                             # first match wins
 ]
 FARM_NODE = re.compile(r"enteric|manure management|manure, |slurry|housing|grazing|excretion|at farm", re.I)
 NOT_FARM = re.compile(r"feed|fodder|forage|silage|\bhay\b|concentrate|ration|basket|Copied from Ecoinvent"
-                      r"|processed in|at plant|at slaughter|at supermarket|at consumer|packaging", re.I)
+                      r"|processed in|at plant|at slaughter|at supermarket|at consumer|packaging"
+                      r"|compost|burden on downstream|on-farm part|purchased part|straw|baled grass", re.I)
+SUB = re.compile(r"enteric|manure management|manure, |slurry|housing|excretion|grazing|grazed grass", re.I)
 MASS = {"kg": 1.0, "g": 1e-3, "mg": 1e-6, "µg": 1e-9, "ug": 1e-9, "ng": 1e-12, "t": 1e3, "ton": 1e3}
 MANURE_CH4 = re.compile(r"feces|faeces|manure|excret|stockage|storage", re.I)
 GWP = [(r"^dinitrogen monoxide$|^nitrous oxide$", 273.0), (r"^methane, fossil", 29.8),
@@ -84,7 +90,7 @@ def extract(zip_path, cache):
         if ref is None or not ref.get("amount"):
             continue
         procs.append({"id": p["@id"], "name": p["name"], "location": (p.get("location") or {}).get("name"),
-                      "ref_flow": ref["flow"]["@id"]})
+                      "ref_flow": ref["flow"]["@id"], "ref_unit": (ref.get("unit") or {}).get("name", "")})
         for e in ex:
             if e is ref:
                 continue
@@ -96,7 +102,8 @@ def extract(zip_path, cache):
                             "amount": amount * MASS.get(unit, 1.0) * (-1 if e.get("isInput") else 1),
                             "description": (e.get("description") or "")[:200]})
             elif e.get("isInput"):
-                tech.append({"process": p["@id"], "flow": f["@id"], "amount": amount})
+                tech.append({"process": p["@id"], "flow": f["@id"], "amount": amount,
+                             "unit": (e.get("unit") or {}).get("name", "")})
     data = pd.DataFrame(procs), pd.DataFrame(tech), pd.DataFrame(bio)
     pickle.dump(data, open(cache, "wb"))
     return data
@@ -105,13 +112,19 @@ def extract(zip_path, cache):
 def farm_inventories(procs, tech, bio):
     """On-farm inventory (flows x livestock products) per unit product, and the product table."""
     procs = procs.assign(sector=procs.name.map(sector_of))
-    is_farm = procs.name.str.contains(FARM_NODE) & ~procs.name.str.contains(NOT_FARM)
-    targets = procs[is_farm & procs.sector.notna() & ~procs.name.str.contains(r"enteric|manure|housing", case=False)]
-    nodes = procs[is_farm].reset_index(drop=True)
+    ok = ~procs.name.str.contains(NOT_FARM)
+    sub = ok & procs.name.str.contains(SUB)
+    animal = ok & procs.name.str.contains(FARM_NODE) & procs.sector.notna() & ~sub & ~procs.name.str.contains(
+        r"\bgrass\b", case=False)
+    targets = procs[animal]
+    nodes = procs[animal | sub].reset_index(drop=True)
     idx = {pid: i for i, pid in enumerate(nodes.id)}
     provider = dict(zip(nodes.ref_flow, nodes.id))          # product flow -> farm process
+    ref_unit = dict(zip(nodes.id, nodes.ref_unit))
     t = tech[tech.process.isin(idx) & tech.flow.isin(provider)]
-    A = sp.csc_matrix((t.amount, ([idx[provider[f]] for f in t.flow], [idx[p] for p in t.process])),
+    u_ref = t.flow.map(provider).map(ref_unit)
+    conv = [MASS[u] / MASS[r] if u in MASS and r in MASS else 1.0 for u, r in zip(t.unit, u_ref)]
+    A = sp.csc_matrix((t.amount * np.array(conv), ([idx[provider[f]] for f in t.flow], [idx[p] for p in t.process])),
                       shape=(len(nodes), len(nodes)))
     b = bio[bio.process.isin(idx)].copy()
     # manure CH4 is kept as an emission but not counted in the anchor (REX/EXIOBASE livestock GHG is enteric)
@@ -142,7 +155,7 @@ def ghg(inv, manure_ch4=False):
 
 def livestock_ratios(zip_path, cache, manure_ch4=False):
     """R (flows x livestock sectors, per kg CO2-eq anchor GHG) and the products behind it."""
-    procs, tech, bio = extract(zip_path, Path(cache) / "agribalyse_parsed_v2.pkl")
+    procs, tech, bio = extract(zip_path, Path(cache) / "agribalyse_parsed_v3.pkl")
     inv, targets = farm_inventories(procs, tech, bio)
     g = ghg(inv, manure_ch4)
     keep = g > 0

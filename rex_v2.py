@@ -1,21 +1,25 @@
 """
 REX LCI extensions v2: agriculture merged, calibration beyond air, fixes, sensitivity
 ====================================================================================
-Starts from the raw extensions of rex_env_extension.py (F_REX.npz) and applies, in order:
+Starts from the raw extensions of rex_env_extension.py (F_REX.npz in out_ecoinvent_rev,
+out_bafu_rev) and applies, in order:
 
 1. agriculture: crop sectors (0-7) from HESTIA on-farm emissions (rex_hestia.py), livestock
    sectors (8-14) from Agribalyse farm subsystems (rex_agribalyse.py). Their pollutants
-   (NH3, N2O, CH4, CO2, NOx, NMVOC, CO, SO2, PM2.5 to air; nitrate and phosphorus to water)
-   replace the same pollutants of the LCI extension in those sectors; all other flows
-   (land, water, resources, metals, ...) stay from ecoinvent / BAFU.
+   (NH3, N2O, CH4, CO2, NOx, NMVOC, CO, SO2, PM2.5 to air; nitrate, phosphate and phosphorus
+   to water) replace the same pollutants of the LCI extension in those sectors; all other
+   flows (land, water, resources, metals, ...) stay from ecoinvent / BAFU.
 2. air: pigs and poultry are calibrated fully to EXIOBASE (their GHG is too small to anchor
-   NH3), then all sectors as in rex_calibrate.py (cells off by more than --threshold).
+   NH3), then all sectors as in rex_calibrate.py (cells off by more than --threshold; filled
+   CH4 / CO biogenic in agriculture, forestry, fishing and biological waste treatment).
 3. beyond air, per country x sector against REX's own extensions, same threshold:
-   - land occupation vs REX land (transformations scaled along, then "from" = "to" per cell,
-     since the per-flow outlier cap breaks their area balance)
-   - fresh water consumption (withdrawals - releases, without salt water, turbine water and
-     releases to the ocean) vs REX blue water; turbine water is removed on both sides and a
-     negative balance is closed (releases dropped where REX has blue water, else cut to zero net)
+   - land: flows are already anchored to REX land; only the area balance of transformations is
+     restored ("from" = "to" per cell, since the per-flow outlier cap breaks it)
+   - water consumption as the source's water-use factors define it (flows with a positive
+     factor minus those with a negative one: evaporation for ecoinvent, fresh-water withdrawals
+     minus releases for BAFU) vs REX blue water; turbine water is removed on both sides and a
+     negative balance is closed (releases dropped where REX has blue water, else cut to zero net);
+     cells with REX blue water but no consumption get it on the main consumption flow
    - extracted mass (energy carriers via heating value) vs REX material; extraction in sectors
      without REX material is dropped (REX books it on the extracting sectors)
 4. EF factors: unspecified chromium gets the Cr(III) factors (as BAFU's own mapping does).
@@ -49,12 +53,12 @@ import scipy.sparse as sp
 
 import rex_agribalyse as ra
 import rex_hestia as rh
-from rex_calibrate import calibrate, load_exiobase, scale_rows
-from rex_env_extension import N_SECTORS, anchor_vectors, load_q_rex, norm_categories
+from rex_calibrate import biogenic_sectors, calibrate, load_exiobase, scale_rows
+from rex_env_extension import N_SECTORS, anchor_vectors, load_q_rex, norm_categories, pool_files, run_pools
 from rex_footprint import footprint
 
-SOURCES = {"ecoinvent": ("out_ecoinvent_final", "cfs_ecoinvent.csv"),
-           "bafu": ("out_bafu_final", "cfs_bafu.csv")}
+SOURCES = {"ecoinvent": ("out_ecoinvent_rev", "cfs_ecoinvent.csv"),
+           "bafu": ("out_bafu_rev", "cfs_bafu.csv")}
 VARIANTS = {
     "base": {},
     "thr1.5": {"threshold": 1.5},
@@ -76,23 +80,21 @@ SPECIES = [
     ("NMVOC", "air", r"^(nmvoc|non-methane volatile organic compounds)"),
     ("CO", "air", r"^(carbon monoxide(, fossil| \(fossil\))?|co)$"),
     ("SO2", "air", r"^(sulfur dioxide|sulphur dioxide|so2)$"),
-    ("PM2.5", "air", r"^(particulates?, < 2\.5 um|particles \(pm2\.5\)|pm25)$"),
+    ("PM2.5", "air", r"^((particulates?|particulate matter), < 2\.5 um|particles \(pm2\.5\)|pm25)$"),
     ("NO3", "water", r"^(nitrate|no3)$"),
-    ("P", "water", r"^(phosphate|phosphorus|p)$"),
+    ("PO4", "water", r"^phosphate$"),                # kg PO4
+    ("P", "water", r"^(phosphorus|p)$"),             # kg P (HESTIA reports P, incl. erosion)
+    ("N", "water", r"^(nitrogen|nitrogen, total \(excluding n2\)|n)$"),   # kg N (none from HESTIA: erosion N left out)
 ]
 PREFERRED = {"air": r"non-urban|low population|rural|unspecified$", "water": r"surface water|fresh water|river"}
-ENERGY_CARRIERS = [  # name pattern, MJ per kg (heating value), kg per m3
-    (r"natural gas|gas, natural", 47.0, 0.75), (r"crude oil|oil, crude", 42.6, 0.0),
-    (r"hard coal|coal, hard", 27.0, 0.0), (r"lignite|brown coal|coal, brown", 10.0, 0.0),
-    (r"peat", 9.0, 0.0), (r"uranium", 560000.0, 0.0)]
 CR_UNSPEC, CR_III = r"^chromium$", r"^chromium,? ?(iii|\(iii\))$"
 
 
 def run_flows(run):
     """Flow dicts (with categories and key) of the rows of F_REX in a run folder."""
-    pools = sorted(Path(run).glob("pools_*.json"))[0]
-    flows = json.load(open(pools))
-    E = np.load(pools.with_suffix(".npz"))["E"]
+    npz, js = pool_files(run_pools(run))
+    flows = json.load(open(js))
+    E = np.load(npz)["E"]
     keep = np.abs(E[:, :, -1]).sum(axis=1) > 0
     out = [{**f, "categories": tuple(f["categories"]), "key": tuple(f["key"])} for f, k in zip(flows, keep) if k]
     assert [f["name"] for f in out] == pd.read_csv(Path(run) / "F_REX_flows.csv").name.tolist()
@@ -125,7 +127,7 @@ def target_rows(flows):
 
 def agri_blocks(hestia_dir, agb_zip, agb_cache, countries, q_ghg):
     """[(F, labels, sectors)]: HESTIA crops and Agribalyse livestock, labels = (group, name)."""
-    df = rh.tidy(rh.extract(Path(hestia_dir) / "Cycle", Path(hestia_dir) / "onfarm_emissions.csv"))
+    df = rh.tidy(rh.extract(Path(hestia_dir) / "Cycle", Path(hestia_dir) / "onfarm_emissions_v2.csv"))
     Fh, fl_h, _ = rh.build(rh.ratios(df), countries, q_ghg)
     lab_h = [("air" if f.endswith("to air") else "water", f.split(" to ")[0]) for f in fl_h]
     R, _ = ra.livestock_ratios(agb_zip, agb_cache)
@@ -158,53 +160,45 @@ def merge_agri(F, flows, blocks, n_countries):
 
 
 def calibrate_air(F, flows, meta, regions, exio, ghg, threshold, full_livestock):
-    cflows = pd.DataFrame({"name": [f["name"] for f in flows], "compartment": [f["compartment"] for f in flows]})
+    cflows = pd.DataFrame({"name": [f["name"] for f in flows], "compartment": [f["compartment"] for f in flows],
+                           "unit": [f["unit"] for f in flows]})
+    bio = biogenic_sectors(meta["sectors"])
     cells = []
     if full_livestock:
         only = {p: np.where(np.isin(np.arange(N_SECTORS), FULL_LIVESTOCK), x, 0.0) for p, x in exio.items()}
-        F, c = calibrate(F, cflows, meta["country_region"], regions, only, ghg, threshold=1.0001)
+        F, c = calibrate(F, cflows, meta["country_region"], regions, only, ghg, threshold=1.0001, biogenic=bio)
         cells.append(c.assign(step="pigs/poultry full"))
-    F, c = calibrate(F, cflows, meta["country_region"], regions, exio, ghg, threshold=threshold)
+    F, c = calibrate(F, cflows, meta["country_region"], regions, exio, ghg, threshold=threshold, biogenic=bio)
     cells.append(c.assign(step=f"air {threshold}x"))
     return F, pd.concat(cells)
 
 
-def to_kg(flow):
-    """kg per unit for energy-carrier resources in MJ or m3 (0 for anything else)."""
-    if norm_categories(flow["categories"])[0] != "natural resource":
-        return 0.0
-    name, unit = flow["name"].lower(), flow["unit"].lower()
-    for pat, per_mj, per_m3 in ENERGY_CARRIERS:
-        if re.search(pat, name):
-            return 1 / per_mj if unit == "megajoule" else per_m3 if unit in ("cubic meter", "sm3") else 0.0
-    return 0.0
+def calibrate_anchors(F, flows, Q, threshold, water_cf):
+    """Land, water and material flows per country x sector against REX land, blue water, material.
 
-
-def calibrate_anchors(F, flows, Q, threshold):
-    """Land, water and material flows per country x sector against REX land, blue water, material."""
-    occ, w_in, w_out, mat = anchor_vectors(flows)
+    water_cf: the source's water-use factor per flow; flows with a positive factor count as
+    consumption (withdrawals, or evaporation in ecoinvent), those with a negative one as releases.
+    """
+    mat = anchor_vectors(flows)[3]
     land = np.array([norm_categories(f["categories"]) == ("natural resource", "land") for f in flows], float)
     t_from = land * np.array([bool(re.match(r"(transformation, )?from ", f["name"], re.I)) for f in flows])
     t_to = land * np.array([bool(re.match(r"(transformation, )?to ", f["name"], re.I)) for f in flows])
-    turb = np.array([w and "turbine" in f["name"].lower() for w, f in zip(w_in, flows)], float)
-    salt = np.array([bool(re.search(r"salt|ocean|sole", f["name"], re.I)) for f in flows])
-    w_in_nt = w_in * (1 - turb) * ~salt                        # fresh water withdrawals
-    w_out = w_out * np.array(["ocean" not in f["compartment"] for f in flows])
+    turb = ((water_cf > 0) & np.array(["turbine" in f["name"].lower() for f in flows])).astype(float)
+    w_in_nt = ((water_cf > 0) & (turb == 0)).astype(float)    # consumption without turbine water
+    w_out = (water_cf < 0).astype(float)                      # releases
     F = F.tocsr()
     v = lambda vec: np.asarray(F.T @ vec).ravel()
     lt = np.log10(threshold)
     off = lambda ext, q: (ext > 0) & (q > 0) & (np.abs(np.log10(np.where((ext > 0) & (q > 0), q / np.where(ext > 0, ext, 1), 1))) > lt)
     stats = {}
 
-    # land: occupation (m2a) vs REX land (km2); occupation and transformation scaled together
-    q_land = Q[5] * 1e6
-    o = v(occ)
-    k = np.where(off(o, q_land), q_land / np.where(o > 0, o, 1), 1.0)
-    F = scale_rows(F, np.where(land > 0)[0], k)
-    stats["land cells scaled"] = int((k != 1).sum())
-    # the per-flow outlier cap breaks the area balance of transformations: "from" = "to" per cell
+    # land: flows are anchored to REX land already (no GHG fallback); scaling the LCI's land-type
+    # mix further (e.g. barn area up to fodder area) is not done. The per-flow outlier cap breaks
+    # the area balance of transformations: "from" is set equal to "to" per cell.
     to, fr = v(t_to), v(t_from)
-    F = scale_rows(F, np.where(t_from > 0)[0], np.where((fr > 0) & (to > 0), to / np.where(fr > 0, fr, 1), 1.0))
+    kf = np.where((fr > 0) & (to > 0), to / np.where(fr > 0, fr, 1), 1.0)
+    F = scale_rows(F, np.where(t_from > 0)[0], kf)
+    stats["land cells balanced"] = int((np.abs(kf - 1) > 1e-9).sum())
 
     # water: turbine water out on both sides, then consumption vs REX blue water (Mm3)
     q_w = Q[3] * 1e6
@@ -221,10 +215,18 @@ def calibrate_anchors(F, flows, Q, threshold):
     F = scale_rows(F, np.where(w_in_nt > 0)[0], kw)
     F = scale_rows(F, np.where(w_out > 0)[0], a * b * kw)
     stats["water cells scaled"] = int((kw != 1).sum())
+    # fill: REX blue water where the extension has no consumption, on the main consumption flow
+    fill = np.where((net <= 0) & (q_w > 0), q_w, 0.0)
+    cons = np.where(w_in_nt > 0)[0]
+    if fill.any() and len(cons):
+        main = cons[np.argmax(np.asarray(F[cons].sum(axis=1)).ravel())]
+        nz = np.nonzero(fill)[0]
+        F = (F + sp.csr_matrix((fill[nz], (np.full(len(nz), main), nz)), shape=F.shape)).tocsr()
+    stats["water cells filled"] = int((fill > 0).sum())
 
     # materials: extracted mass (kg; energy carriers via heating value) vs REX material (kt).
     # REX books extraction on the extracting sectors: where REX has no material, LCI extraction is dropped.
-    mass = mat + np.array([to_kg(f) for f in flows])
+    mass = mat                                   # anchor_vectors already converts energy carriers
     q_m = Q[0] * 1e6
     m = v(mass)
     km = np.where(off(m, q_m), q_m / np.where(m > 0, m, 1), 1.0)
@@ -260,7 +262,7 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--rex", required=True, help="REX coinvent folder (runs, REX3_2022, EXIOBASE_2022)")
     ap.add_argument("--cache", required=True, help="rex_cache: T memmap, output vectors, CF tables")
-    ap.add_argument("--hestia", required=True, help="HESTIA release folder (Cycle/, onfarm_emissions.csv)")
+    ap.add_argument("--hestia", required=True, help="HESTIA release folder (Cycle/, onfarm_emissions_v2.csv)")
     ap.add_argument("--agribalyse", required=True, help="Agribalyse 3.2 openLCA JSON-LD export (zip)")
     ap.add_argument("--agribalyse-cache", required=True)
     ap.add_argument("--variants", nargs="+", default=list(VARIANTS))
@@ -277,7 +279,7 @@ def main():
         for variant in args.variants:
             opt = {"threshold": 3.0, "agri": True, "beyond": True, "full_livestock": True, "run_suffix": "",
                    **VARIANTS[variant]}
-            run = rex / (run_name.replace("_final", opt["run_suffix"]) if opt["run_suffix"] else run_name)
+            run = rex / f"{run_name}{opt['run_suffix']}"
             if not (run / "F_REX.npz").exists():
                 print(f"skip {source} {variant}: {run} has no F_REX.npz")
                 continue
@@ -294,13 +296,18 @@ def main():
                 if variant == "base":
                     maplog.assign(source=source).to_csv(out / f"agri_flow_mapping_{source}.csv", index=False)
             F, cells = calibrate_air(F, flows, meta, regions, exio, Q[1], opt["threshold"], opt["full_livestock"])
-            stats = {}
-            if opt["beyond"]:
-                F, stats = calibrate_anchors(F, flows, Q, opt["threshold"])
-            sp.save_npz(run / f"F_REX_v2_{variant}.npz", F)
             cfs = cache / cf_name.replace(".csv", "_v2.csv")
             n_cr = fix_cfs(cache / cf_name, flows, cfs)
-            logs.append({"source": source, "variant": variant, "air cells changed": len(cells),
+            stats = {}
+            if opt["beyond"]:
+                w = pd.read_csv(cfs)
+                w = w[w.category == "water use"]
+                w = dict(zip(zip(w.database, w.code), w.cf))
+                water_cf = np.array([w.get(f["key"], 0.0) for f in flows], float)
+                F, stats = calibrate_anchors(F, flows, Q, opt["threshold"], water_cf)
+            sp.save_npz(run / f"F_REX_v2_{variant}.npz", F)
+            changed = cells[cells.action != "flag: EXIOBASE zero"]
+            logs.append({"source": source, "variant": variant, "air cells changed": len(changed),
                          "Cr flows refactored": n_cr, **stats})
             print(source, variant, logs[-1])
             label = f"{source}_v2_{variant}"

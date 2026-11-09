@@ -59,6 +59,23 @@ POLLUTANTS = {
 }
 
 
+# Filled CH4 / CO go to the biogenic flow in these sectors, to the fossil one elsewhere
+BIOGENIC_NAME = r"non-fossil|biogenic"
+BIOGENIC_SECTORS = (r"^cultivation|farming|meat animals|animal products|raw milk|wool|manure|forestry|fishing"
+                    r"|landfill|compost|biogas|waste ?water")
+# Air flows that the propagation step leaves alone: not co-emitted with the calibrated
+# pollutants (water vapour, heat, radionuclides, halogenated and other industrial gases)
+PROPAGATE_EXCLUDE = (r"^water\b|heat|radon|krypton|xenon|tritium|hydrogen-3|carbon-14|uranium|radium|thorium"
+                     r"|iodine|ca?esium|plutonium|polonium|lead-210|cobalt-|strontium|argon|radioactive|noble gas"
+                     r"|cfc|hcfc|halon|fluor|chloroform|carbon tetrachloride|trichloroethane|methyl bromide"
+                     r"|methane, bromo|sulfur hexafluoride")
+
+
+def biogenic_sectors(sectors):
+    """Indices of REX sectors whose filled CH4 / CO is biogenic."""
+    return {i for i, s in enumerate(sectors) if re.search(BIOGENIC_SECTORS, s.strip('"'), re.I)}
+
+
 def load_exiobase(path, exio_name_dict, codes):
     """EXIOBASE air pollutants as {pollutant: (regions, n_sectors) array in REX sector order}."""
     raw = pd.read_csv(path, sep="\t", header=[0, 1], index_col=0)
@@ -82,16 +99,20 @@ def scale_rows(F, rows, col_scale):
     return (F + S @ (Fs - F[rows])).tocsr()
 
 
-def calibrate(F, flows, country_region, regions, exio, ghg, threshold=3.0, fill=True, propagate=True):
+def calibrate(F, flows, country_region, regions, exio, ghg, threshold=3.0, fill=True, propagate=True,
+              biogenic=None):
     """Return calibrated F (csr) and a DataFrame of changed / flagged cells.
 
     propagate: per (region, sector) cell, the median log factor exio/lci over all
-    compared pollutants is applied to the other air flows of that cell (except CO2,
-    which carries the REX GHG anchor) if it is below 1/threshold.
+    compared pollutants is applied to the other air flows of that cell (kg flows except
+    CO2, which carries the REX GHG anchor, and PROPAGATE_EXCLUDE) if it is below 1/threshold.
+    biogenic: sector indices whose filled CH4 and CO go to the biogenic flow (else fossil).
     """
     n_c = len(country_region)
     reg_idx = np.array([regions.index(r) for r in country_region])
     F = F.tocsr()
+    names = flows.name.str.lower()
+    is_bio_col = np.isin(np.arange(n_c * N_SECTORS) % N_SECTORS, sorted(biogenic or []))
     cells = []
     logk = []                       # per pollutant: log10(exio/lci) where both > 0, else nan
     covered = np.zeros(F.shape[0], bool)
@@ -117,7 +138,12 @@ def calibrate(F, flows, country_region, regions, exio, ghg, threshold=3.0, fill=
         if out.any() and len(sel):
             F = scale_rows(F, sel, k[reg_idx].ravel())          # per country x sector column
         if add.any():
-            main = sel[np.argmax(np.abs(np.asarray(F[sel].sum(axis=1)).ravel()))]
+            tot = np.abs(np.asarray(F[sel].sum(axis=1)).ravel())
+            main = np.full(n_c * N_SECTORS, sel[np.argmax(tot)])
+            bio = [k for k, i in enumerate(sel) if re.search(BIOGENIC_NAME, names.iloc[i])]
+            fos = [k for k, i in enumerate(sel) if "fossil" in names.iloc[i] and k not in bio]
+            if p in ("CH4", "CO") and biogenic is not None and bio and fos:
+                main = np.where(is_bio_col, sel[max(bio, key=lambda k: tot[k])], sel[max(fos, key=lambda k: tot[k])])
             share = ghg.reshape(n_c, N_SECTORS).clip(min=0)
             reg_tot = np.zeros_like(x)
             np.add.at(reg_tot, reg_idx, share)
@@ -126,7 +152,7 @@ def calibrate(F, flows, country_region, regions, exio, ghg, threshold=3.0, fill=
                          1.0 / n_in[reg_idx])
             vals = np.where(add[reg_idx], x[reg_idx] * w, 0.0).ravel()
             nz = np.nonzero(vals)[0]
-            F = (F + sp.csr_matrix((vals[nz], (np.full(len(nz), main), nz)), shape=F.shape)).tocsr()
+            F = (F + sp.csr_matrix((vals[nz], (main[nz], nz)), shape=F.shape)).tocsr()
 
         for action, mask in (("scaled", out), ("filled", add), ("flag: EXIOBASE zero", flag)):
             for r, s in zip(*np.nonzero(mask)):
@@ -139,8 +165,10 @@ def calibrate(F, flows, country_region, regions, exio, ghg, threshold=3.0, fill=
             med = np.nanmedian(np.array(logk), axis=0)          # (regions, sectors)
         # downwards only: too low LCI totals mean missing activities, not a scalable profile
         g = np.where(np.isfinite(med) & (med < -np.log10(threshold)), 10 ** np.nan_to_num(med), 1.0)
-        other = np.where(flows.compartment.str.startswith("air").values & ~covered
-                         & ~flows.name.str.match(r"^carbon dioxide", case=False).values)[0]
+        unit_kg = flows.unit.eq("kilogram").values if "unit" in flows else np.ones(len(flows), bool)
+        other = np.where(flows.compartment.str.startswith("air").values & ~covered & unit_kg
+                         & ~flows.name.str.match(r"^carbon dioxide", case=False).values
+                         & ~names.str.contains(PROPAGATE_EXCLUDE).values)[0]
         if (g != 1).any() and len(other):
             F = scale_rows(F, other, g[reg_idx].ravel())
         for r, s in zip(*np.nonzero(g != 1)):
@@ -180,7 +208,8 @@ def main():
     Q = load_q_rex(args.rex_dir, len(meta["q_labels"]), F.shape[1])
 
     Fc, cells = calibrate(F, flows, meta["country_region"], regions, exio, Q[1],
-                          args.threshold, not args.no_fill, not args.no_propagate)
+                          args.threshold, not args.no_fill, not args.no_propagate,
+                          biogenic=biogenic_sectors(meta["sectors"]))
     sp.save_npz(run / "F_REX_calibrated.npz", Fc)
     cells.assign(sector=[meta["sectors"][s] for s in cells.sector] if len(cells) else []).to_csv(
         run / "calibration_cells.csv", index=False)

@@ -7,20 +7,37 @@ sector-level flow ratios with an existing REX extension ("anchor"):
     F[f, c, s] = R[f, s, region(c)] * Q_REX[anchor(f), c, s]
     R[f, s, r] = sum_j w_j flow_f,j / sum_j w_j anchor_j   (j: activities of sector s
                                                             in region r)
-    w_j = production volume (ecoinvent, default) or 1 / direct GHG_j (equal weights;
-          always used for BAFU, which has no production volumes)
+    w_j = production volume (ecoinvent, default), 1 (--weighting none: one unit of each
+          product; used for BAFU, which has no production volumes) or 1 / direct GHG_j
+          (--weighting ghg: equal weights)
 
 Anchors by compartment:
-    air, other           -> Climate change impacts [kg CO2-eq]  (IPCC 2021 GWP100)
-    water                -> Blue water consumption [Mio. m3]   (water in - water to water)
+    air, other           -> Climate change impacts [kg CO2-eq]  (IPCC 2021 GWP100, emissions
+                            only: uptakes such as CO2 to soil or biomass stock are left out)
+    water volumes, vapour-> Blue water consumption [Mio. m3]   (water in - water to water)
+    pollutants in water  -> Climate change impacts (as air: they follow production)
     soil, resource land  -> Total land use area EXIOBASE3 [km2] (occupation m2a)
     resource in water/air-> Blue water consumption [Mio. m3]
-    other resources (kg) -> Total material footprint [kt]
+    other resources      -> Total material footprint [kt]       (kg; energy carriers in MJ or m3
+                            converted to kg with their heating value)
+
+Uptakes (flows with a negative GHG factor: CO2 to soil or biomass stock) are left out of
+the extension as they are of the anchor. In ecoinvent they sit on land-use-change datasets
+without emissions; spread by GHG over every country they turned the LULUC footprint negative.
+Unweighted pools (BAFU) count an activity's flows only where it has the flow's anchor: the
+per-unit amounts of a dataset without it have no common scale with the pool (1 m3 of uranium
+tailings, no direct GHG, set the radon intensity of all waste treatment).
 
 Outliers: within each pool, activity intensities (flow per unit of anchor) are
 winsorised at the 90th percentile (--cap-quantile) when >= 5 activities emit the flow.
 
-Ratio fallback: regional pool -> global pool -> global pool against GHG.
+A pool is used for an anchor if it has >= --min-acts activities and activities with a
+positive anchor make up >= --min-share of them, by count or by weight (production volume).
+Ratio fallback: regional pool -> global pool; air flows (GHG anchor) only. Land, water and
+material flows without a ratio of their own stay empty (scaling them with GHG produced land on
+oil fields and water releases in gas power); --ghg-fallback restores the older chain
+(... -> regional pool against GHG -> global pool against GHG) for them. The material anchor is
+not used where metal or uranium content without ore makes up most of it (REX material is ore).
 Regional pools only contain activities whose ecoinvent location maps to a
 single Exiobase region; GLO, RoW, RER etc. only enter the global pool.
 
@@ -83,6 +100,11 @@ BAFU_CATEGORY_ALIAS = {
 }
 # BAFU dataset names that override the (coarse) category -> ISIC bridge
 BAFU_NAME_RULES = [
+    # the gas chain would otherwise fall back to the dominant ISIC of "natural gas" (gas power)
+    (r"^natural gas.*long-distance pipeline", "4930"),
+    (r"^natural gas, (high|low) pressure|^natural gas.*at consumer", "3520"),
+    (r"^natural gas, (production|liquefied)|^natural gas.*at (evaporation plant|production)", "0620"),
+    (r"^crude oil, (production|at production)", "0610"),
     (r"\b(rhodium|platinum|palladium|gold|silver|iridium|ruthenium)\b.*(refinery|primary|at plant)", "2420"),
     (r"at mine|\bore\b|concentrate|beneficiation", "0729"),
     (r"formwork", "4390"),
@@ -100,6 +122,15 @@ BAFU_FUELS = {"natural gas": "natural gas", "uranium": "nuclear power", "oil": "
 
 # Resource flows left out of the material anchor (kg, but not extracted material)
 MATERIAL_EXCLUDE = ("carbon dioxide", "oxygen", "nitrogen, in air")  # lower case
+# Energy-carrier resources given in MJ or m3 enter the material anchor as kg
+# Resource flows that are metal or uranium content rather than mined material (ore, gangue)
+CONTENT = (r"^(uranium|gold|silver|platinum|palladium|rhodium|iridium|ruthenium|osmium|rhenium|copper"
+           r"|nickel|zinc|lead|tin|cobalt|molybdenum|tantalum|indium|gallium|germanium|tellurium"
+           r"|cadmium|lithium|tungsten|antimony|bismuth|mercury|chromium|manganese|titanium)\b")
+ENERGY_CARRIERS = [  # name pattern, MJ per kg (heating value), kg per m3
+    (r"natural gas|gas, natural", 47.0, 0.75), (r"crude oil|oil, crude", 42.6, 0.0),
+    (r"hard coal|coal, hard", 27.0, 0.0), (r"lignite|brown coal|coal, brown", 10.0, 0.0),
+    (r"peat", 9.0, 0.0), (r"uranium", 560000.0, 0.0)]
 
 # Several ISIC codes map to many Exiobase sectors (e.g. 3510 -> all electricity
 # technologies). Activities are assigned by the first matching keyword on
@@ -132,6 +163,9 @@ KEYWORDS = [
     # quarrying, gas, food, chemicals, crops
     ("i14.2", r"sand|clay|gravel|kaolin|bentonite"),
     ("i11.c", r"liquef|\blng\b|regasif"),
+    # ISIC 06 covers crude oil and gas: the reference product decides
+    ("i11.b", r"\|\s*(natural gas|sour gas|sweet gas|shale gas)"),
+    ("i11.a", r"petroleum|crude oil|oil, crude|\boil\b|bitumen|oil sand"),
     ("i15.a", r"cattle|beef|\bcow\b|veal"),
     ("i15.b", r"\bpig|pork|swine"),
     ("i15.c", r"chicken|poultry|broiler|turkey|duck"),
@@ -143,7 +177,16 @@ KEYWORDS = [
     ("i01.e", r"rape|soybean|sunflower|oil ?seed|groundnut|peanut|linseed|mustard"),
     ("i23.3", r"nuclear|radioactive"),
 ]
-DEFAULTS = ["i40.11.l", "i27.45", "i13.20.16", "i14.1", "i11.b", "i15.d", "i15.i",
+# Nuclear fuel chain, whatever ISIC or BAFU category it carries: ISIC rev. 4 files conversion,
+# enrichment and fuel elements under basic chemicals (2011) and uranium tailings under waste
+# treatment (382); BAFU spreads uranium mining over ores, chemicals and cement. Exiobase has
+# its own sectors: mining incl. milling and tailings (i12), processing of nuclear fuel (i23.3).
+NUCLEAR_ISIC = ("07", "20", "23", "38")
+NUCLEAR_FUEL = [
+    ("i12", r"uranium.*(\bmine\b|yellowcake|\bmill|tailing)|(\bmine\b|\bmill|tailing).*uranium"),
+    ("i23.3", r"uranium|nuclear fuel|nuclear spent fuel|spent nuclear fuel|fuel element|\bmox\b|radioactive"),
+]
+DEFAULTS =["i40.11.l", "i27.45", "i13.20.16", "i14.1", "i11.b", "i15.d", "i15.i",
             "i24.4", "i01.c", "i37", "i22"]
 # waste treatment (3811/3812): treatment type x material
 WASTE_TREATMENT = [("i90.1", r"incinerat|open burning"), ("i90.6", r"landfill|open dump"), ("i90.4", r"compost"),
@@ -266,6 +309,10 @@ def refine(cands, text):
 def isic_sectors(isic, isic_to_exio, code_index, text=""):
     """REX sector indices for an ecoinvent ISIC code, coarsening if unmatched."""
     isic = isic.split(":")[0].strip()
+    if isic[:2] in NUCLEAR_ISIC:
+        code = next((c for c, pat in NUCLEAR_FUEL if re.search(pat, text, re.I)), None)
+        if code in code_index:
+            return [code_index[code]]
     for n in (len(isic), 3, 2):
         key = isic[:n]
         hits = isic_to_exio.get(key)
@@ -319,8 +366,12 @@ def norm_categories(cats):
 
 def flow_anchor(categories, name, unit):
     comp, sub = norm_categories(categories)
+    if comp == "air" and name.lower() == "water" and unit == "cubic meter":
+        return "water"  # evaporation: what ecoinvent's water-use factors characterise
     if comp == "water":
-        return "water"
+        # water volumes follow blue water; pollutants in water follow production (GHG), since
+        # e.g. produced water from oil fields is released without any water consumption
+        return "water" if name.lower().startswith("water") and unit == "cubic meter" else "ghg"
     if comp == "soil":
         return "land"
     if comp == "natural resource":
@@ -349,9 +400,20 @@ def anchor_vectors(flows):
     w_in = np.array([f["anchor"] == "water" and c[0] == "natural resource" and c[1] != "in air"
                      and f["name"] != "Water, in air" for c, f in zip(comp, flows)], float)
     w_out = np.array([c[0] == "water" and f["name"] == "Water" for c, f in zip(comp, flows)], float)
-    mat = np.array([f["anchor"] == "material" and f["unit"] == "kilogram"
-                    and not f["name"].lower().startswith(MATERIAL_EXCLUDE) for f in flows], float)
+    mat = np.array([float(f["anchor"] == "material" and f["unit"] == "kilogram"
+                          and not f["name"].lower().startswith(MATERIAL_EXCLUDE)) or to_kg(f) for f in flows])
     return occ, w_in, w_out, mat
+
+
+def to_kg(flow):
+    """kg per unit for energy-carrier resources in MJ or m3 (0 for anything else)."""
+    if norm_categories(flow["categories"])[0] != "natural resource":
+        return 0.0
+    name, unit = flow["name"].lower(), flow["unit"].lower()
+    for pat, per_mj, per_m3 in ENERGY_CARRIERS:
+        if re.search(pat, name):
+            return 1 / per_mj if unit == "megajoule" else per_m3 if unit in ("cubic meter", "sm3") else 0.0
+    return 0.0
 
 
 def cap_intensities(X, a, q, min_n):
@@ -380,26 +442,38 @@ def accumulate(records, B, diag, cf, flows, loc_region, regions, weighting, cap_
     weighting 'ghg': each activity normalised to 1 kg CO2-eq direct GHG (equal weights);
     weighting 'none': per-unit inventories (1 unit of each reference product).
     cap_q: outlier cap per pool, see cap_intensities (None or >= 1 disables).
-    Returns E (n_flows, n_sectors, n_pools), A (n_anchors, ...), n_acts, n_pos.
+    Returns E (n_flows, n_sectors, n_pools), A (n_anchors, ...), n_acts, n_pos and pos_share
+    (weighted share of activities with a positive anchor; the weights are the pooling weights).
+    The GHG anchor counts emissions only and uptakes (negative factors, e.g. CO2 to soil or
+    biomass stock) are left out of the pools too, as in REX's GHG account. With weighting
+    'none' an activity's flows count only where it has the flow's anchor (per-unit amounts
+    without it have no common scale with the pool).
     """
     occ, w_in, w_out, mat = anchor_vectors(flows)
+    cf_pos = np.clip(cf, 0, None)
+    uptake = cf < 0
+    print("uptakes left out:", sorted({f"{flows[i]['name']} ({flows[i]['compartment']})"
+                                       for i in np.flatnonzero(uptake)}))
+    n_unanchored = 0
     n_pool = len(regions) + 1
     reg_index = {r: i for i, r in enumerate(regions)}
     E = np.zeros((B.shape[0], N_SECTORS, n_pool))
     A = np.zeros((len(ANCHORS), N_SECTORS, n_pool))
     n_acts = np.zeros((N_SECTORS, n_pool), int)
     n_pos = np.zeros((len(ANCHORS), N_SECTORS, n_pool), int)  # activities with anchor > 0
+    pos_share = np.zeros((len(ANCHORS), N_SECTORS, n_pool))
     factors = np.array([v[1] for v in ANCHORS.values()])
     a_of_flow = np.array([list(ANCHORS).index(f["anchor"]) for f in flows])
-    cols, a_vecs, members = [], [], {}
+    cols, a_vecs, weights, members = [], [], [], {}
 
     for j, location, secs, pv in records:
         if not secs or diag[j] == 0:
             continue
         col = B[:, j].toarray().ravel() / diag[j]
+        col[uptake] = 0.0
         if not col.any():  # no direct exchanges (pure technosphere datasets)
             continue
-        ghg = cf @ col
+        ghg = cf_pos @ col
         if weighting == "pv":
             scale = pv
         elif weighting == "ghg":
@@ -409,7 +483,7 @@ def accumulate(records, B, diag, cf, flows, loc_region, regions, weighting, cap_
         if scale <= 0:
             continue
         col *= scale / len(secs)
-        a_vec = factors * np.array([cf @ col, max(w_in @ col - w_out @ col, 0.0), occ @ col, mat @ col])
+        a_vec = factors * np.array([cf_pos @ col, max(w_in @ col - w_out @ col, 0.0), occ @ col, mat @ col])
         pools = [n_pool - 1]
         r = loc_region.get(location)
         if r in reg_index:
@@ -417,21 +491,31 @@ def accumulate(records, B, diag, cf, flows, loc_region, regions, weighting, cap_
         k = len(cols)
         cols.append(sp.csr_matrix(col))
         a_vecs.append(a_vec)
+        weights.append(scale / len(secs))
         for s in secs:
             for p in pools:
                 members.setdefault((s, p), []).append(k)
 
-    a_vecs = np.array(a_vecs)
+    a_vecs, weights = np.array(a_vecs), np.array(weights)
     for (s, p), ks in members.items():
         X = sp.vstack([cols[k] for k in ks]).toarray()
         a = a_vecs[ks]
+        if weighting == "none":
+            anchored = a[:, a_of_flow] > 0
+            if p == n_pool - 1:
+                n_unanchored += int(((X != 0) & ~anchored).sum())
+            X = np.where(anchored, X, 0.0)
         if cap_q is not None and cap_q < 1 and len(ks) >= cap_min:
             X = cap_intensities(X, a[:, a_of_flow], cap_q, cap_min)
         E[:, s, p] = X.sum(axis=0)
         A[:, s, p] = a.sum(axis=0)
         n_pos[:, s, p] = (a > 0).sum(axis=0)
+        w = weights[ks]
+        pos_share[:, s, p] = ((a > 0) * w[:, None]).sum(axis=0) / w.sum()
         n_acts[s, p] = len(ks)
-    return E, A, n_acts, n_pos
+    if weighting == "none":
+        print(f"global pools: {n_unanchored} activity-flow amounts without the flow's anchor left out")
+    return E, A, n_acts, n_pos, pos_share
 
 
 def ecoinvent_pools(project, database, isic_to_exio, code_index, loc_region, regions, weighting="pv",
@@ -456,6 +540,8 @@ def ecoinvent_pools(project, database, isic_to_exio, code_index, loc_region, reg
     rev_bio = {v: k for k, v in lca.biosphere_dict.items()}
     flows = [flow_meta(list(rev_bio[i]), bd.get_activity(rev_bio[i])) for i in range(B.shape[0])]
 
+    stats = {"used": 0, "no_isic": 0, "no_sector": 0, "no_production_volume": 0}
+
     def records():
         for rec in ActivityDataset.select().where(ActivityDataset.database == database):
             d = rec.data
@@ -464,9 +550,15 @@ def ecoinvent_pools(project, database, isic_to_exio, code_index, loc_region, reg
             isic = dict(d.get("classifications") or []).get("ISIC rev.4 ecoinvent")
             text = f"{d.get('name', '')} | {d.get('reference product', '')}"
             secs = isic_sectors(isic, isic_to_exio, code_index, text) if isic else []
-            yield lca.activity_dict[(database, rec.code)], rec.location, secs, pv.get(rec.code, 0.0)
+            volume = pv.get(rec.code, 0.0)
+            key = ("no_isic" if not isic else "no_sector" if not secs
+                   else "no_production_volume" if weighting == "pv" and volume <= 0 else "used")
+            stats[key] += 1
+            yield lca.activity_dict[(database, rec.code)], rec.location, secs, volume
 
-    return (flows, *accumulate(records(), B, diag, cf, flows, loc_region, regions, weighting, *cap))
+    pools = (flows, *accumulate(records(), B, diag, cf, flows, loc_region, regions, weighting, *cap))
+    print("ecoinvent activities:", stats)
+    return pools
 
 
 def ecospold1_bridge(project, database):
@@ -487,19 +579,22 @@ def bafu_pools(project, database, bridge, isic_to_exio, code_index, loc_region, 
 
     No ISIC and no production volumes: sector via BAFU category -> EcoSpold01 ->
     most frequent ecoinvent ISIC (+ keyword refinement); activities unweighted (per
-    unit of product) or equal per kg CO2-eq. Skips obsolete datasets, mixes/markets
-    and infrastructure (unit 'unit').
+    unit of product) or equal per kg CO2-eq. Skips obsolete datasets, mixes/markets,
+    infrastructure (unit 'unit') and aggregated datasets (no technosphere input, >= 50
+    biosphere flows: cradle-to-gate inventories, not direct emissions).
     """
     import bw2data as bd
     import bw2calc as bc
 
     bd.projects.set_current(project)
     db = bd.Database(database)
-    top = bridge.sort_values("n", ascending=False).drop_duplicates("ecospold1")
+    # ties in n are broken by the lower ISIC code, independent of the pandas sort algorithm
+    order = dict(by=["n", "isic"], ascending=[False, True], kind="mergesort")
+    top = bridge.sort_values(**order).drop_duplicates("ecospold1")
     cat_isic = dict(zip(top.ecospold1, top.isic))
     main = (bridge.assign(main=bridge.ecospold1.str.split("/").str[0])
             .groupby(["main", "isic"]).n.sum().reset_index()
-            .sort_values("n", ascending=False).drop_duplicates("main"))
+            .sort_values(**order).drop_duplicates("main"))
     main_isic = dict(zip(main["main"], main.isic))
 
     def isic_of(act):
@@ -525,7 +620,12 @@ def bafu_pools(project, database, bridge, isic_to_exio, code_index, loc_region, 
     lca.load_lci_data()
     lca.load_lcia_data()
     B = lca.biosphere_matrix.tocsc()
-    diag = np.abs(lca.technosphere_matrix.diagonal())
+    T = lca.technosphere_matrix.tocsc()
+    diag = np.abs(T.diagonal())
+    # aggregated (cradle-to-gate) datasets: no technosphere input but many biosphere flows; their
+    # "direct" emissions are whole supply chains
+    n_tech = np.diff(T.indptr) - (diag != 0)
+    aggregated = (n_tech == 0) & (np.diff(B.indptr) >= 50)
     cf = np.asarray(lca.characterization_matrix.diagonal()).ravel()
     rev_bio = {v: k for k, v in lca.dicts.biosphere.items()}
     flows = []
@@ -533,7 +633,7 @@ def bafu_pools(project, database, bridge, isic_to_exio, code_index, loc_region, 
         node = bd.get_node(id=rev_bio[i])
         flows.append(flow_meta([node["database"], node["code"]], node))
 
-    stats = {"used": 0, "skipped": 0, "no_isic": 0}
+    stats = {"used": 0, "skipped": 0, "aggregated": 0, "no_isic": 0}
 
     def records():
         for act in db:
@@ -541,6 +641,9 @@ def bafu_pools(project, database, bridge, isic_to_exio, code_index, loc_region, 
             if (act.get("sector") == "obsolete" or act.get("unit") == "unit"
                     or re.search(BAFU_SKIP, text, re.I)):
                 stats["skipped"] += 1
+                continue
+            if aggregated[lca.dicts.activity[act.id]]:
+                stats["aggregated"] += 1
                 continue
             isic = isic_of(act)
             if isic is None:
@@ -555,32 +658,64 @@ def bafu_pools(project, database, bridge, isic_to_exio, code_index, loc_region, 
     return pools
 
 
+def pool_files(path):
+    """(npz, json) of a pool cache; the stem may contain dots, so no with_suffix."""
+    path = Path(path)
+    return path.parent / f"{path.name}.npz", path.parent / f"{path.name}.json"
+
+
+def run_pools(run):
+    """Pool cache of a run folder: named in meta.json, else the only pools_*.json there."""
+    run = Path(run)
+    meta = json.load(open(run / "meta.json"))
+    if "pools_file" in meta:
+        return run / meta["pools_file"]
+    found = sorted(run.glob("pools_*.json"))
+    if len(found) != 1:
+        raise FileNotFoundError(f"{run}: expected one pools_*.json, found {len(found)}")
+    return found[0].with_suffix("")
+
+
 def save_pools(path, pools):
-    flows, E, A, n_acts, n_pos = pools
-    np.savez_compressed(path.with_suffix(".npz"), E=E, A=A, n_acts=n_acts, n_pos=n_pos)
-    json.dump([{**f, "categories": list(f["categories"])} for f in flows],
-              open(path.with_suffix(".json"), "w"))
+    flows, E, A, n_acts, n_pos, pos_share = pools
+    npz, js = pool_files(path)
+    np.savez_compressed(npz, E=E, A=A, n_acts=n_acts, n_pos=n_pos, pos_share=pos_share)
+    json.dump([{**f, "categories": list(f["categories"])} for f in flows], open(js, "w"))
 
 
 def load_pools(path):
-    z = np.load(path.with_suffix(".npz"))
-    return json.load(open(path.with_suffix(".json"))), z["E"], z["A"], z["n_acts"], z["n_pos"]
+    npz, js = pool_files(path)
+    z = np.load(npz)
+    share = z["pos_share"] if "pos_share" in z else z["n_pos"] / np.maximum(z["n_acts"], 1)
+    return json.load(open(js)), z["E"], z["A"], z["n_acts"], z["n_pos"], share
 
 
 # ---------------------------------------------------------------------------
 # Ratios and extension
 # ---------------------------------------------------------------------------
-def ratios(flows, E, A, n_acts, n_pos, min_acts=1, min_share=0.5, global_only=False):
+def ratios(flows, E, A, n_acts, n_pos, pos_share, min_acts=1, min_share=0.5, global_only=False,
+           ghg_fallback=False):
     """R[f, s, pool] and the fallback level used per (anchor, sector, pool).
 
     A pool/anchor is usable if its total is > 0, it has >= min_acts activities and
-    >= min_share of them have a positive anchor (avoids exploding ratios on
-    near-zero anchors). Levels: 0 regional, 1 global, 2 regional GHG, 3 global GHG, 4 none.
+    activities with a positive anchor make up >= min_share of them, by count or by weight
+    (production volume for ecoinvent). This avoids exploding ratios on near-zero anchors
+    without discarding pools where a few large activities carry the anchor (by weight) or
+    where most activities do while one large one does not (by count).
+    The material anchor is not used where metal or uranium content (no ore, no gangue) makes
+    up most of it: REX material is gross ore, so such ratios would inflate the content flows.
+    Land, water and material flows fall back to GHG (levels 2/3) only with ghg_fallback.
+    Levels: 0 regional, 1 global, 2 regional GHG, 3 global GHG, 4 none.
     """
     anchor_names = list(ANCHORS)
     a_idx = np.array([anchor_names.index(f["anchor"]) for f in flows])
     glob = E.shape[2] - 1
-    ok = (A > 0) & (n_acts >= min_acts) & (n_pos >= min_share * np.maximum(n_acts, 1))
+    shared = (n_pos >= min_share * np.maximum(n_acts, 1)) | (pos_share >= min_share)
+    ok = (A > 0) & (n_acts >= min_acts) & shared
+    m = anchor_names.index("material")
+    content = anchor_vectors(flows)[3] * np.array([bool(re.match(CONTENT, f["name"], re.I)) for f in flows])
+    content_share = np.einsum("f,fsp->sp", content, E) * ANCHORS["material"][1] / np.where(A[m] > 0, A[m], 1)
+    ok[m] &= content_share <= 0.5
     if global_only:
         ok[:, :, :glob] = False
     R = np.zeros_like(E)
@@ -589,7 +724,7 @@ def ratios(flows, E, A, n_acts, n_pos, min_acts=1, min_share=0.5, global_only=Fa
         fa = a_idx == a
         for s in range(N_SECTORS):
             for p in range(E.shape[2]):
-                chain = [(a, p, 0), (a, glob, 1), (0, p, 2), (0, glob, 3)]
+                chain = [(a, p, 0), (a, glob, 1)] + ([(0, p, 2), (0, glob, 3)] if a == 0 or ghg_fallback else [])
                 for anc, pool, lv in chain:
                     if ok[anc, s, pool]:
                         R[fa, s, p] = E[fa, s, pool] / A[anc, s, pool]
@@ -637,6 +772,8 @@ def main():
                     help="min. emitting activities in a pool before the cap applies")
     ap.add_argument("--global-only", action="store_true",
                     help="use global sector ratios for all countries (no regional pools)")
+    ap.add_argument("--ghg-fallback", action="store_true",
+                    help="let land, water and material flows fall back to the GHG anchor")
     ap.add_argument("--out", required=True)
     args = ap.parse_args()
 
@@ -666,9 +803,9 @@ def main():
     if args.source == "bafu" and weighting == "pv":
         ap.error("BAFU has no production volumes: use --weighting none or ghg")
     cap = (args.cap_quantile, args.cap_min)
-    cache = out / f"pools_{args.database}_{weighting}_cap{args.cap_quantile:g}"
-    if cache.with_suffix(".npz").exists():
-        flows, E, A, n_acts, n_pos = load_pools(cache)
+    cache = out / f"pools_{args.database}_{weighting}_cap{args.cap_quantile:g}_min{args.cap_min}".replace(".", "p")
+    if pool_files(cache)[0].exists():
+        flows, E, A, n_acts, n_pos, pos_share = load_pools(cache)
     else:
         if args.source == "bafu":
             bridge = pd.read_csv(args.bridge, dtype={"isic": str})
@@ -679,12 +816,13 @@ def main():
                                     code_index, location_regions(s2), regions, weighting, cap)
             ecospold1_bridge(args.project, args.database).to_csv(out / "ecospold1_isic_bridge.csv", index=False)
         save_pools(cache, pools)
-        flows, E, A, n_acts, n_pos = pools
+        flows, E, A, n_acts, n_pos, pos_share = pools
 
     keep = np.abs(E[:, :, -1]).sum(axis=1) > 0           # flows present in some sector
     flows = [f for f, k in zip(flows, keep) if k]
     E = E[keep]
-    R, level, a_idx = ratios(flows, E, A, n_acts, n_pos, args.min_acts, args.min_share, args.global_only)
+    R, level, a_idx = ratios(flows, E, A, n_acts, n_pos, pos_share, args.min_acts, args.min_share,
+                             args.global_only, args.ghg_fallback)
 
     pd.DataFrame([{k: v for k, v in f.items() if k not in ("key", "categories")} for f in flows]).assign(
         rex_anchor=[q_labels[ANCHORS[f["anchor"]][0]] for f in flows]
@@ -705,10 +843,14 @@ def main():
     json.dump({"countries": countries, "country_region": c_regions, "pools": regions + ["GLO"],
                "sectors": sectors, "exio_codes": codes, "q_labels": q_labels,
                "anchors": {k: q_labels[v[0]] for k, v in ANCHORS.items()},
-               "source": args.source, "database": args.database, "weighting": weighting},
+               "source": args.source, "database": args.database, "weighting": weighting,
+               "pools_file": cache.name, "cap_quantile": args.cap_quantile, "cap_min": args.cap_min,
+               "min_acts": args.min_acts, "min_share": args.min_share, "global_only": args.global_only,
+               "ghg_fallback": args.ghg_fallback},
               open(out / "meta.json", "w"), indent=1)
 
-    print(f"{len(flows)} flows, sectors without any activity: {int((n_acts[:, -1] == 0).sum())}")
+    print(f"{len(flows)} flows, sectors without any activity: {int((n_acts[:, -1] == 0).sum())}, "
+          f"with a GHG ratio: {int((level[0, :, -1] < 4).sum())}")
     if args.rex_dir is None:
         print("no --rex-dir given: ratios written, F not built")
         return None

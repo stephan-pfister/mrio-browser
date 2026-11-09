@@ -82,10 +82,11 @@ def export_cfs(project, prefix, out):
 # ---------------------------------------------------------------------------
 def flow_keys(run):
     """(database, code) per row of F_REX, reconstructed from the cached pools."""
+    from rex_env_extension import pool_files, run_pools
     run = Path(run)
-    pools = sorted(run.glob("pools_*.json"))[0]
-    flows = json.load(open(pools))
-    E = np.load(pools.with_suffix(".npz"))["E"]
+    npz, js = pool_files(run_pools(run))
+    flows = json.load(open(js))
+    E = np.load(npz)["E"]
     keep = np.abs(E[:, :, -1]).sum(axis=1) > 0
     keys = [tuple(f["key"]) for f, k in zip(flows, keep) if k]
     names = pd.read_csv(run / "F_REX_flows.csv").name.tolist()

@@ -4,9 +4,10 @@ Ranking comparison of footprint approaches across EF 3.1 categories
 For each EF category and each pair of approaches (footprints from rex_footprint.py),
 how similarly are producer countries and producer sectors ranked?
 
-    spearman   rank correlation over all countries (or sectors)
-    top10      how many of approach A's top 10 are in approach B's top 10
-    top1       whether both name the same largest contributor
+    spearman   rank correlation over all countries (or sectors), signed values
+    top10      how many of approach A's top 10 are in approach B's top 10 (by magnitude,
+               zero contributions left out)
+    top1       whether both name the same largest contributor (by magnitude)
     ratio      total B / total A
 
     python compare_rankings.py --dir <footprint folder> --country Switzerland
@@ -26,11 +27,18 @@ def load(d, country, label, by):
     return pd.read_csv(Path(d) / f"footprint_{country}_{label}_by_{by}.csv", index_col=0)
 
 
+def top(s, n):
+    """The n largest contributions by magnitude (negative ones count too), zeros left out."""
+    s = s.abs()
+    return set(s[s > 0].nlargest(n).index)
+
+
 def compare(a, b):
-    """Rank agreement of two contribution vectors (same index)."""
+    """Rank agreement of two contribution vectors (aligned on their index)."""
+    a, b = a.align(b, fill_value=0.0)
     rho = spearmanr(a, b).statistic if a.std() > 0 and b.std() > 0 else np.nan
-    ta, tb = set(a.nlargest(10).index), set(b.nlargest(10).index)
-    return {"spearman": rho, "top10": len(ta & tb), "top1": a.idxmax() == b.idxmax(),
+    t1a, t1b = top(a, 1), top(b, 1)
+    return {"spearman": rho, "top10": len(top(a, 10) & top(b, 10)), "top1": bool(t1a) and t1a == t1b,
             "ratio": b.sum() / a.sum() if a.sum() else np.nan}
 
 
@@ -51,8 +59,9 @@ def main():
                 rows.append({"by": by, "category": cat, "A": a, "B": b,
                              **compare(tabs[a][cat], tabs[b][cat])})
             for l in args.approaches:
-                top = tabs[l][cat].nlargest(3)
-                tops[(by, cat, l)] = "; ".join(f"{i[:32]} {v / tabs[l][cat].sum():.0%}" for i, v in top.items())
+                col = tabs[l][cat]
+                big = col.reindex(col.abs().nlargest(3).index)
+                tops[(by, cat, l)] = "; ".join(f"{i[:32]} {v / col.sum():.0%}" for i, v in big.items())
     res = pd.DataFrame(rows)
     top = pd.Series(tops).unstack()
     top.index.names = ["by", "category"]

@@ -137,24 +137,28 @@ repository.
 
 `hestia-2026-04-30` holds the HESTIA aggregated release 2026-04-30 (CC-BY 4.0) as Brightway
 datasets: 367 crop and processed-crop cycles (latest period per product and country, 48 countries),
-683 datasets after allocation. It links only to `bafu-2026` and `ef-3.1-biosphere`, so the system
+684 datasets after allocation. It links only to `bafu-2026` and `ef-3.1-biosphere`, so the system
 contains no ecoinvent.
 
 | Part | Modelling |
 |---|---|
-| Products | All products with an economic value share; 190 multi-output cycles (grain + straw, oil + meal, rice milling) split by `split_multioutput`, rule `crop` (economic, LEAP) or `economic` for processing. Co-products under 0.5 % of the main product's mass (intercrop artefacts of the aggregation) are dropped. |
-| Inputs | Fertilisers per nutrient, diesel/petrol/LPG/fuel oil/natural gas as supply only (HESTIA carries the combustion emissions), grid electricity by country ("Electricity mix", GLO fallback), machinery, lime, tap water, processing chemicals → bafu-2026. Seed and crop inputs of processing cycles → HESTIA datasets. Manure and compost: no burden (residues). |
-| Emissions | HESTIA on-farm emissions → EF 3.1 (non-urban air, fresh water). Fossil vs. biogenic vs. land-use-change CO₂/CH₄/CO split by emission source; dLUC, drained organic soils and vegetation burning count as land use change. HESTIA background emissions are dropped. |
-| Pesticides | PEF default: 90 % of the applied active ingredient to agricultural soil, 9 % to air, 1 % to fresh water, matched by CAS; plus "Pesticide unspecified" production per kg AI. |
+| Products | All products with an economic value share; 191 multi-output cycles (grain + straw, oil + meal, rice milling) split by `split_multioutput`, rule `crop` (economic, LEAP) or `economic` for processing, with HESTIA's value shares. A co-product is dropped only if it is under 0.5 % of the main product's mass and under 2 % of the value (intercrop artefacts of the aggregation). |
+| Inputs | Fertilisers per nutrient, diesel/petrol/LPG/fuel oil/natural gas as supply only (HESTIA carries the combustion emissions), grid electricity by country ("Electricity mix", GLO fallback), machinery, lime, tap water, processing chemicals → bafu-2026. Seed, and crop or crude-oil inputs of processing cycles → HESTIA datasets. Manure and compost: no burden (residues). |
+| Emissions | HESTIA on-farm emissions → EF 3.1 (non-urban air, PM2.5 close to ground, fresh water). Fossil vs. biogenic vs. land-use-change CO₂/CH₄/CO split by emission source; CO₂ from biofuels is biogenic; dLUC, drained organic soils and vegetation burning count as land use change, carbon gains are not credited. Fuel-combustion totals that repeat per-fuel entries are dropped. P lost with eroded soil counts; N lost with eroded soil does not (N to water is nitrate leaching, as in PEF, ecoinvent and Agribalyse; scored as total N it would dominate marine eutrophication). HESTIA background emissions are dropped. |
+| Pesticides | PEF default: 90 % of the applied active ingredient to agricultural soil, 9 % to air, 1 % to fresh water, matched by CAS; plus "Pesticide unspecified" production per kg AI. Active ingredients without an EF flow (unspecified, pesticide classes) are emitted as the cycle's identified mix where that carries at least as much mass, else as the mean mix over all cycles. Bulk, inert and processing substances HESTIA types as ingredients (oils, kaolin, chlorine, sulphur, acids) are left out. |
 | Land, water | Occupation (site + unused duration) as Arable, Arable irrigated or Permanent crops; irrigation withdrawals as ground, river or lake water, taken as consumed. |
 
-**Gaps** (`reports/hestia_unmapped.csv`): pesticides reported only as unspecified, herbicide,
-insecticide or fungicide (about 1 t AI over all cycles), 75 named active ingredients without an EF
-flow, PM10/TSP/black carbon (no EF factor), coal, wood fuel, sulphur, gypsum, branded NPK products,
-saplings and seedlings (counted in pieces).
+**Gaps** (`reports/hestia_unmapped.csv`): PM10/TSP/black carbon (no EF factor), coal, wood fuel,
+sulphur, gypsum, branded NPK products, saplings and seedlings (counted in pieces). Unidentified
+pesticide active ingredients are listed there too, marked "proxy": they are emitted through the
+proxy above, not dropped.
 
-**Data issue:** HESTIA's almond cycle for Spain reports 4 kg/ha deltamethrin, roughly 200 times a
-normal dose, which dominates its freshwater ecotoxicity.
+**Data issues:** HESTIA's almond cycle for Spain reports 4 kg/ha deltamethrin, roughly 200 times a
+normal dose, which dominates its freshwater ecotoxicity. In some aggregated cycles the straw amount
+and its value share come from different sets of farms: pearl millet, India, lists 283 kg straw
+against 2,135 kg dry matter of residue removed, yet gives straw 36 % of the value (similar for
+sorghum, barley and wheat in India). The grain follows HESTIA's value shares; the per-kg impacts
+of these straw datasets come out too high.
 
 Scores per product (`--score`) go to `reports/hestia_ef31_scores.csv`, allocation factors to
 `reports/hestia_allocation.csv`.

@@ -9,19 +9,25 @@ Per HESTIA cycle (functional unit: 1 ha, or the processed amount):
 
 - products with an economic value share become production exchanges; multi-output cycles
   (grain + straw, oil + meal, rice milling fractions) are split with
-  ``pef_allocation.split_multioutput`` under the economic rule ("crop", LEAP / PEF Annex IV)
+  ``pef_allocation.split_multioutput`` under the economic rule ("crop", LEAP / PEF Annex I);
+  co-products under 0.5 % of the main product's mass and 2 % of the value are dropped
 - inputs are linked to bafu-2026 (fertilisers per nutrient, fuels as supply only, grid
-  electricity, machinery, pesticides, lime, tap water, processing chemicals); seed and crop
-  inputs of processing cycles are linked to HESTIA datasets; manure and compost carry no
-  burden (residues, PEF cut-off)
-- on-farm emissions are mapped to EF 3.1 flows; HESTIA background emissions are dropped
-  (BAFU supplies the upstream chains)
+  electricity, machinery, pesticides, lime, tap water, processing chemicals); seed, and crop
+  or crude-oil inputs of processing cycles, are linked to HESTIA datasets; manure and compost
+  carry no burden (residues, PEF cut-off)
+- on-farm emissions are mapped to EF 3.1 flows, including P lost with eroded soil. N lost with
+  eroded soil is left out: PEF, ecoinvent and Agribalyse count N to water as nitrate leaching,
+  and soil-bound N scored as total N would dominate marine eutrophication (cotton, millets).
+  HESTIA background emissions are dropped (BAFU supplies the upstream chains). Fuel-combustion
+  totals that duplicate per-fuel entries are dropped, CO2 from biofuels is biogenic, and carbon
+  gains from land-use change are not credited (PEF: no credit for carbon storage)
 - pesticides follow the PEF default: 90 % of the applied active ingredient to agricultural
-  soil, 9 % to air, 1 % to fresh water (HESTIA's own pesticide fate is not used); active
-  ingredients without an EF flow (unspecified, classes, unknown CAS) are emitted as the cycle's
-  identified mix, or the mix over all cycles where a cycle has none
+  soil, 9 % to air, 1 % to fresh water (HESTIA's own pesticide fate is not used). Unidentified
+  active ingredients (unspecified, classes) are emitted as the cycle's identified mix where that
+  carries most of the mass, else as the mean mix over all cycles; bulk, inert and processing
+  substances HESTIA types as ingredients (oils, kaolin, chlorine, sulphur, acids...) are left out
 - land occupation (site + unused duration) as Arable / Permanent crops, irrigation water as
-  ground, river or lake water withdrawal (taken as consumed)
+  ground, river or lake water withdrawal (canal water as river water; taken as consumed)
 
 Inputs and emissions that cannot be mapped are logged to ``reports/hestia_unmapped.csv``.
 
@@ -57,7 +63,7 @@ ISO2 = {"albania": "AL", "argentina": "AR", "australia": "AU", "bangladesh": "BD
         "russia": "RU", "south-africa": "ZA", "spain": "ES", "sweden": "SE", "tanzania": "TZ",
         "thailand": "TH", "turkey-country": "TR", "ukraine": "UA", "united-kingdom": "GB",
         "united-states": "US", "viet-nam": "VN", "world": "GLO"}
-PROCESSED = re.compile(r"Meal$|Oil(Crude|Refined|Virgin)$|Flour|Bran$|Husk$|Refined|DistillersGrain|^wine$")
+PROCESSED = re.compile(r"Meal$|Oil(Crude|Refined|Virgin)$|Flour|Bran$|(?<!In)Husk$|Refined|DistillersGrain|^wine$")
 PERMANENT = re.compile(r"^(apple|avocado|banana|blueberry|cocoa|coffee|grapes|guava|hazelnut|jujube|kiwifruit"
                        r"|lemon|mandarin|mango|olive|orange|peach|pistachio|almond|oilPalm)", re.I)
 
@@ -116,40 +122,59 @@ INPUTS = {
     "inorganicMagnesiumFertiliserUnspecifiedKgMg": ("Magnesium sulphate, at plant", ["RER"], 120.4 / 24.3),
     "boron": ("Borax, anhydrous, powder, at plant", ["RER"], 201.2 / 43.2),
 }
-MIN_MASS_SHARE = 0.005  # co-products below this mass relative to the main product are dropped
+# co-products below both thresholds (mass relative to the main product, value share in %) are
+# dropped: aggregation artefacts such as intercrops with near-zero averaged amounts
+MIN_MASS_SHARE, MIN_VALUE_SHARE = 0.005, 2.0
 PESTICIDE = ("Pesticide unspecified, at regional storehouse", ["RER"], 1.0)
 ELECTRICITY = re.compile(r"^electricityGrid")
 NO_BURDEN = re.compile(r"manure|compost|slurry|excreta|organicFertiliser|digestate|residue", re.I)
 WATER_RESOURCE = {"waterPumpedGroundwater": "Ground Water", "waterRiverStream": "river water",
-                  "waterLakeOrReservoir": "lake water", "waterSourceUnspecified": "Water"}
+                  "waterLakeOrReservoir": "lake water", "waterIrrigationCanal": "river water",
+                  "waterSourceUnspecified": "Water"}
+# inputs HESTIA types as pesticide ingredients that are bulk, inert or processing substances
+NOT_PESTICIDE = re.compile(r"chlorine|thiosul|sodium sul|zinc sul|kaolin|paraffin|mineral oil|petroleum oil"
+                           r"|vegetable oil|buttermilk|zeolite|boric|borax|adjuvant|surfactant|sulphur|sulfur"
+                           r"|hydroxide|phosphoric|sulphuric|sulfuric|nitrogen|benzoic|ethylene glycol", re.I)
+# unidentified active ingredients: the only ones the proxy stands in for
+UNIDENTIFIED_AI = re.compile(r"unspecifiedai$|compoundsunspecified$", re.I)
+BIOFUEL = re.compile(r"biodiesel|ethanol|biogas|vegetable oil|wood", re.I)
 
 AIR = ("Emissions", "Emissions to air", "Emissions to non-urban air or from high stacks")
+AIR_GROUND = ("Emissions", "Emissions to air", "Emissions to non-urban air close to ground")
 AIR_UNSPEC = ("Emissions", "Emissions to air", "Emissions to air, unspecified")
 FRESH = ("Emissions", "Emissions to water", "Emissions to fresh water")
+WATER_UNSPEC = ("Emissions", "Emissions to water", "Emissions to water, unspecified")
 AGSOIL = ("Emissions", "Emissions to soil", "Emissions to agricultural soil")
+SOIL_UNSPEC = ("Emissions", "Emissions to soil", "Emissions to soil, unspecified")
 LUC = re.compile(r"LandUseChange|ManagementChange|StockChange|NaturalVegetationBurning|OrganicSoil")
-PEF_PESTICIDE = [(AGSOIL, 0.90), (AIR, 0.09), (FRESH, 0.01)]
+# PEF default split of the applied active ingredient, with compartments to fall back on
+PEF_PESTICIDE = [((AGSOIL, SOIL_UNSPEC), 0.90), ((AIR, AIR_GROUND, AIR_UNSPEC), 0.09), ((FRESH, WATER_UNSPEC), 0.01)]
 
 
-def emission_flow(term):
-    """EF 3.1 (name, compartment) for an on-farm HESTIA emission term, or None."""
+def emission_flow(term, biofuel=False):
+    """EF 3.1 [(name, compartment), ...] candidates for an on-farm HESTIA emission term, or []."""
+    if term == "pErosionSoilFlux":                       # P reaching water with eroded soil
+        return [("Phosphorus", FRESH), ("Phosphorus", WATER_UNSPEC)]
     sp, comp = re.match(r"^(.+?)To([A-Z][a-z]+)", term).groups() if re.match(r"^.+?To[A-Z]", term) else (term, "")
-    fuel = "FuelCombustion" in term
+    fuel = "FuelCombustion" in term and not biofuel
     luc = bool(LUC.search(term))
     if comp == "Air":
+        if sp == "pm25":                                 # field and tractor emissions, close to ground
+            return [("Particles (PM0.2 - PM2.5)", AIR_GROUND), ("Particles (PM2.5)", AIR), ("Particles (PM2.5)", AIR_UNSPEC)]
         name = {"nh3": "Ammonia", "n2O": "Nitrous Oxide", "nox": "Nitrogen Oxides", "so2": "Sulfur Dioxide",
-                "nmvoc": "Non-methane Volatile Organic Compounds", "pm25": "Particles (PM2.5)",
-                "h2S": "Hydrogen Sulfide",
+                "nmvoc": "Non-methane Volatile Organic Compounds", "h2S": "Hydrogen Sulfide",
                 "ch4": "Methane (land Use Change)" if luc else "Methane (fossil)" if fuel else "Methane (biogenic)",
                 "co": "Carbon Monoxide (land Use Change)" if luc else
                       "Carbon Monoxide (fossil)" if fuel else "Carbon Monoxide (biogenic)",
-                "co2": "Carbon Dioxide (land Use Change)" if luc else "Carbon Dioxide (fossil)"}.get(sp)
-        return (name, AIR) if name else None
+                "co2": "Carbon Dioxide (land Use Change)" if luc else
+                       "Carbon Dioxide (fossil)" if fuel or "FuelCombustion" not in term else "Carbon Dioxide (biogenic)"
+                }.get(sp)
+        return [(name, AIR), (name, AIR_UNSPEC)] if name else []
     if sp == "no3" and comp in ("Groundwater", "Surface"):
-        return ("Nitrate", FRESH)
+        return [("Nitrate", FRESH), ("Nitrate", WATER_UNSPEC)]
     if sp == "p" and comp in ("Drainage", "Groundwater", "Surface"):
-        return ("Phosphorus", FRESH)
-    return None
+        return [("Phosphorus", FRESH), ("Phosphorus", WATER_UNSPEC)]
+    return []
 
 
 def load_cycles(cycle_dir, cache):
@@ -166,7 +191,8 @@ def load_cycles(cycle_dir, cache):
         c = json.load(open(f, encoding="utf-8"))
         term = lambda x: {"id": x["term"]["@id"], "name": x["term"].get("name", x["term"]["@id"]),
                           "units": x["term"].get("units"), "type": x["term"].get("termType"),
-                          "value": (x.get("value") or [0])[0]}
+                          "value": (x.get("value") or [0])[0],
+                          "inputs": [i.get("@id") for i in x.get("inputs") or []]}
         out.append({"id": f.stem, "product": product, "country": country,
                     "period": f"{c.get('startDate', '')[:4]}-{c.get('endDate', '')[:4]}",
                     "siteArea": c.get("siteArea", 1), "siteDuration": c.get("siteDuration") or 365,
@@ -187,7 +213,7 @@ class Lookup:
         self.bg = {(a["name"], a["location"]): a for a in bd.Database(BG)}
         self.elec = {a["location"]: a for (n, _), a in self.bg.items() if n == "Electricity mix"}
         self.bio, self.cas = {}, {}
-        for f in bd.Database(BIO):
+        for f in sorted(bd.Database(BIO), key=lambda f: f["code"]):     # deterministic where names repeat
             cat = tuple(f.get("categories") or ())
             self.bio.setdefault((f["name"].lower(), cat), f["code"])
             if f.get("CAS number"):
@@ -211,9 +237,25 @@ class Lookup:
 
 def pesticide_flows(term, lk):
     """[(EF flow code, share)] of the PEF 90/9/1 split for an active ingredient given by CAS, or []."""
-    cas = term[4:].lstrip("0") if term.startswith("CAS-") else None
-    flows = [(lk.cas.get((cas, comp)), share) for comp, share in PEF_PESTICIDE] if cas else []
-    return flows if flows and all(f for f, _ in flows) else []
+    if not term.startswith("CAS-"):
+        return []
+    cas = term[4:].lstrip("0")
+    flows = [(next((lk.cas[(cas, c)] for c in comps if (cas, c) in lk.cas), None), share)
+             for comps, share in PEF_PESTICIDE]
+    return flows if all(f for f, _ in flows) else []
+
+
+def is_pesticide(i, processing):
+    """Inputs HESTIA types as pesticide ingredients that are real crop-protection active ingredients."""
+    return (i["type"] == "pesticideAI" and not processing
+            and not NOT_PESTICIDE.search(i["id"]) and not NOT_PESTICIDE.search(i["name"]))
+
+
+def farm_emissions(c):
+    """On-farm emissions without double counts: where HESTIA gives fuel-combustion emissions per
+    fuel input and also as an unlinked total from another model, the unlinked total is dropped."""
+    linked = {e["id"] for e in c["emissions"] if "FuelCombustion" in e["id"] and e.get("inputs")}
+    return [e for e in c["emissions"] if e.get("inputs") or e["id"] not in linked]
 
 
 def build(cycles, lk):
@@ -223,11 +265,18 @@ def build(cycles, lk):
         by_product[c["product"]][c["country"]] = c
     unmapped = defaultdict(lambda: [0, 0.0, ""])
     data = []
-    global_mix = defaultdict(float)
+    # global mix of identified active ingredients: mean of the cycles' mass shares, so that no
+    # single cycle (e.g. an implausible dose) dominates it
+    global_mix, n_mix = defaultdict(float), 0
     for c in cycles:
-        for i in c["inputs"]:
-            if i["type"] == "pesticideAI" and i["value"] and pesticide_flows(i["id"], lk):
-                global_mix[i["id"]] += i["value"]
+        proc = bool(PROCESSED.search(c["product"]))
+        ident = {i["id"]: i["value"] for i in c["inputs"]
+                 if i["value"] and is_pesticide(i, proc) and pesticide_flows(i["id"], lk)}
+        if ident:
+            n_mix += 1
+            for t, v in ident.items():
+                global_mix[t] += v / sum(ident.values())
+    global_mix = {t: v / n_mix for t, v in global_mix.items()}
 
     def miss(term, value, units):
         unmapped[term][0] += 1
@@ -240,9 +289,11 @@ def build(cycles, lk):
         processing = bool(PROCESSED.search(c["product"]))
         products = [p for p in c["products"] if p["share"]] or [p for p in c["products"] if p["primary"]]
         main = next((p for p in products if p["primary"]), products[0])
-        # aggregated cycles can carry intercrops with near-zero averaged amounts but a value share;
-        # per kg they would get absurd burdens, so they are dropped (main product keeps the burden)
-        products = [p for p in products if p is main or p["value"] >= MIN_MASS_SHARE * main["value"]]
+        # aggregated cycles can carry intercrops with near-zero averaged amounts and a small value
+        # share; per kg they would get absurd burdens, so they are dropped (the remaining products
+        # share their burden)
+        products = [p for p in products if p is main or p["value"] >= MIN_MASS_SHARE * main["value"]
+                    or (p["share"] or 0) >= MIN_VALUE_SHARE]
         name = f"{main['name']}, {c['country']}, HESTIA {c['period']}"
         ex = [{"type": "production", "product": p["name"], "amount": p["value"], "unit": "kilogram",
                "name": name, "location": loc, "input": (FG, code),
@@ -260,14 +311,19 @@ def build(cycles, lk):
                 ex.append({"type": "technosphere", "amount": v, "input": (BG, a["code"]), "name": a["name"],
                            "product": a.get("reference product"), "unit": a["unit"], "location": a["location"]})
             elif i["type"] == "pesticideAI":
+                if not is_pesticide(i, processing):
+                    miss(f"{t} (not a crop-protection ingredient, left out)", v, i["units"])
+                    continue
                 ex.append(lk.tech(*PESTICIDE[:2], v))
                 flows = pesticide_flows(t, lk)
                 if flows:
                     ex += [{"type": "biosphere", "amount": v * s, "input": (BIO, f)} for f, s in flows]
                     known[t] += v
-                else:
+                elif UNIDENTIFIED_AI.search(t):
                     unknown += v
-                    miss(f"{t} (emission, proxy)", v, i["units"])
+                    miss(f"{t} (unidentified, emitted via proxy)", v, i["units"])
+                else:
+                    miss(f"{t} (no EF flow, emission left out)", v, i["units"])
             elif t in WATER_RESOURCE:
                 f = lk.flow(WATER_RESOURCE[t], ("Resources", "Resources from water",
                                                 "Renewable material resources from water"))
@@ -275,7 +331,7 @@ def build(cycles, lk):
             elif t == "seed" and not processing:
                 ex.append({"type": "technosphere", "amount": v, "input": (FG, code), "product": main["name"],
                            "name": name, "unit": "kilogram", "location": loc})
-            elif i["type"] == "crop" and t in by_product:
+            elif i["type"] in ("crop", "processedFood") and t in by_product:
                 src = by_product[t].get(c["country"]) or by_product[t].get("world")
                 if src is None:
                     miss(t, v, i["units"])
@@ -289,18 +345,27 @@ def build(cycles, lk):
             else:
                 miss(t, v, i["units"])
         if unknown:
-            # proxy for unidentified active ingredients: the cycle's own identified mix, else the global one
-            mix = known or global_mix
+            # proxy for unidentified active ingredients: the cycle's identified mix where it carries at
+            # least as much mass as the unidentified part, else the global mix
+            mix = known if sum(known.values()) >= unknown else global_mix
             total = sum(mix.values())
             for t, kg in mix.items():
                 ex += [{"type": "biosphere", "amount": unknown * kg / total * s, "input": (BIO, f),
                         "comment": "PEF pesticide proxy"} for f, s in pesticide_flows(t, lk)]
-        for e in c["emissions"]:
-            fl = emission_flow(e["id"])
-            code_f = lk.flow(fl[0], fl[1], AIR_UNSPEC) if fl else None
+        for e in farm_emissions(c):
+            if not e["value"]:
+                continue
+            if LUC.search(e["id"]) and e["value"] < 0:        # PEF: no credit for carbon storage
+                miss(f"{e['id']} (carbon gain, not credited)", e["value"], e["units"])
+                continue
+            if e["id"] == "nErosionSoilFlux":
+                miss(f"{e['id']} (soil-bound N, left out: nitrate leaching only)", e["value"], e["units"])
+                continue
+            biofuel = any(BIOFUEL.search(x or "") for x in e.get("inputs") or [])
+            code_f = next((f for f in (lk.flow(n, comp) for n, comp in emission_flow(e["id"], biofuel)) if f), None)
             if code_f:
                 ex.append({"type": "biosphere", "amount": e["value"], "input": (BIO, code_f)})
-            elif e["value"]:
+            else:
                 miss(e["id"], e["value"], e["units"])
         if not processing:
             irrigated = any(i["id"] in WATER_RESOURCE and i["value"] for i in c["inputs"])
@@ -346,7 +411,7 @@ def main():
     ap.add_argument("--score", action="store_true", help="also score every product with EF 3.1")
     args = ap.parse_args()
 
-    cycles = load_cycles(args.cycles, Path(args.cycles).parent / "cycles_latest_compact.json")
+    cycles = load_cycles(args.cycles, Path(args.cycles).parent / "cycles_latest_compact_v2.json")
     bd.projects.set_current(PROJECT)
     if FG in bd.databases:
         del bd.databases[FG]

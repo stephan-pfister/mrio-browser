@@ -47,7 +47,8 @@ CROP_SECTORS = {
     7: ["coffeeSeedDehulled", "cocoaSeedWhole"],
 }
 # processed products belong to food-processing sectors, not crop cultivation
-PROCESSED = re.compile(r"Meal$|Oil(Crude|Refined|Virgin)$|Flour|Bran$|Husk$|Refined$|DistillersGrain|^wine$")
+PROCESSED = re.compile(r"Meal$|Oil(Crude|Refined|Virgin)$|Flour|Bran$|(?<!In)Husk$|Refined$|DistillersGrain|^wine$")
+BIOFUEL = re.compile(r"biodiesel|ethanol|biogas|vegetable oil|wood", re.I)
 COUNTRY_ALIASES = {"united-states": "USA", "united-kingdom": "UK", "turkey-country": "Turkey",
                    "cote-divoire": "Cote dIvoire", "viet-nam": "Viet Nam"}
 EXCLUDE = re.compile(r"LandUseChange|ManagementChange|StockChange|NaturalVegetationBurning|OrganicSoil")
@@ -66,19 +67,27 @@ def crop_sector(product):
 
 
 def extract(cycle_dir, cache):
-    """On-farm emissions per cycle (kg per ha), one row per cycle x emission term."""
+    """On-farm emissions per cycle (kg per ha), one row per cycle x emission entry.
+
+    Where HESTIA gives fuel-combustion emissions per fuel input and also as an unlinked total
+    from another model, the unlinked total is dropped (it would count them twice).
+    """
     if Path(cache).exists():
-        return pd.read_csv(cache)
+        return pd.read_csv(cache, keep_default_na=False, na_values=[""])
     rows = []
     for f in sorted(Path(cycle_dir).glob("*.jsonld")):
         m = re.match(r"(.+?)-(.+)-(\d{4})-(\d{4})-\d{8}$", f.stem)
         product, country, start = m.group(1), m.group(2), int(m.group(3))
         c = json.load(open(f, encoding="utf-8"))
-        for e in c.get("emissions", []):
-            if e.get("methodTier") == "background" or not e.get("value"):
+        ems = [e for e in c.get("emissions", []) if e.get("methodTier") != "background" and e.get("value")]
+        linked = {e["term"]["@id"] for e in ems if "FuelCombustion" in e["term"]["@id"] and e.get("inputs")}
+        for e in ems:
+            inputs = ";".join(i.get("@id", "") for i in e.get("inputs") or [])
+            if not inputs and e["term"]["@id"] in linked:
                 continue
             rows.append({"cycle": f.stem, "product": product, "country": country, "start": start,
-                         "term": e["term"]["@id"], "units": e["term"].get("units"), "value": e["value"][0]})
+                         "term": e["term"]["@id"], "units": e["term"].get("units"), "value": e["value"][0],
+                         "inputs": inputs})
     df = pd.DataFrame(rows)
     df.to_csv(cache, index=False)
     return df
@@ -89,9 +98,15 @@ def tidy(df):
     df = df[df.start == df.groupby(["product", "country"]).start.transform("max")].copy()
     df["sector"] = df["product"].map(crop_sector)
     df = df[df.sector.notna() & ~df.term.str.contains(EXCLUDE)].copy()
+    # CO2 from burning biofuels is biogenic: not part of the fossil CO2 flow or the anchor
+    df = df[~(df.term.str.startswith("co2ToAirFuelCombustion") & df.inputs.fillna("").str.contains(BIOFUEL))]
     df["sector"] = df.sector.astype(int)
+    # P with eroded soil counts (as in ecoinvent and Agribalyse); soil-bound N does not: N to water
+    # is nitrate leaching there and in PEF, and scored as total N it dominated marine eutrophication
+    df = df[df.term != "nErosionSoilFlux"]
+    df["term"] = df.term.replace({"pErosionSoilFlux": "pToErosion"})
     parts = df.term.str.extract(r"^(?P<species>.+?)To(?P<compartment>[A-Z][A-Za-z]*?)(?=[A-Z]|$)")
-    df = df.join(parts).dropna(subset=["species"])           # soil fluxes without a compartment
+    df = df.join(parts).dropna(subset=["species"])
     fossil_co2 = df.term.str.match(r"co2ToAir(FuelCombustion|UreaHydrolysis|LimeNeutralisation)")
     gwp = np.select([df.species == "n2O", (df.species == "ch4") & df.term.str.contains("FuelCombustion"),
                      df.species == "ch4", fossil_co2], [GWP["n2O"], GWP["ch4_fossil"], GWP["ch4"], GWP["co2"]], 0)
@@ -166,7 +181,7 @@ def main():
     out.mkdir(parents=True, exist_ok=True)
     meta = json.load(open(args.meta))
     countries = meta["countries"]
-    df = tidy(extract(Path(args.hestia) / "Cycle", Path(args.hestia) / "onfarm_emissions.csv"))
+    df = tidy(extract(Path(args.hestia) / "Cycle", Path(args.hestia) / "onfarm_emissions_v2.csv"))
     R = ratios(df)
     R.to_csv(out / "hestia_ratios.csv")
     Q = load_q_rex(args.rex_dir, len(meta["q_labels"]), len(countries) * N_SECTORS)
