@@ -55,7 +55,7 @@ def read_workbook(path):
 
 def main(path):
     published = read_workbook(path)
-    ours = pd.read_csv(OURS)
+    ours = pd.read_csv(OURS, keep_default_na=False)  # "NA" is Namibia, not a missing value
     ours["key"] = ours["product"] + " - " + ours["location"]
     missing = sorted(set(ours.key) - set(published))
     print(f"{ours.key.nunique()} products, {len(missing)} not in the workbook: {missing[:5]}")
@@ -75,8 +75,8 @@ def main(path):
         stats = [(int((abs(r - 1) <= .01).sum()), int((abs(r - 1) <= .1).sum()), r.median())
                  for r in (x.ratio_raw, x.ratio)]
         print(f"  {c:<45} " + "  ->  ".join(f"{a:3d} / {b:3d}  {m:6.3f}" for a, b, m in stats) + f"   of {len(x)}")
-    worst = ours.assign(dev=lambda d: abs(np.log(abs(d.ratio))))
-    print("\nLargest deviations:")
+    worst = ours.assign(dev=lambda d: np.where(d.ratio < 0, np.inf, abs(np.log(abs(d.ratio)))))
+    print("\nLargest deviations (sign changes first):")
     print(worst.sort_values("dev", ascending=False).head(15)[["key", "category", "BAFU", "published", "ratio"]]
           .to_string(index=False, float_format=lambda v: f"{v:.4g}"))
 

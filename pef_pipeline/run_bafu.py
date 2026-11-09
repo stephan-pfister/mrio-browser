@@ -23,7 +23,6 @@ OUT = HERE.parent / "reports" / "pef_bafu_results.csv"  # reports/ stays local (
 
 # bafu-2026 codes
 GRASS = "7521559b-1ba5-3113-88de-95a1effa5532"      # Grass from meadow intensive IP, at field
-HAY = "1a708f5a-094b-3f1b-a071-593baef3773e"        # xx Hay intensive IP, at farm
 SILAGE = "37b896c5-d2f1-3bf9-8e90-60ca7d4dbf14"     # Silage maize IP, at farm
 WHEAT = "a469599a-f6b9-3b5a-b90b-eb512ef684f6"      # Wheat IP, at feed mill
 MAIZE = "dd8175b2-cdc5-38ed-83d8-c4bbc93f8b71"      # Grain maize IP, at feed mill
@@ -34,9 +33,10 @@ ELEC_MV = "baf52276-8f3a-3683-b0df-77e80f0748dc"    # Electricity, medium voltag
 HEAT = "2fcda415-e506-38d9-9c3e-8ce2c2e7c8f2"       # Heat, natural gas, at industrial furnace 1MW
 WATER = "1a2f0384-d903-4f9d-8757-1e78d84366ab"      # Tap water, at user
 PET_V = "c7af8832-9551-38fd-a628-363e6fc17c8e"      # PET granulate, bottle grade, RER
-PET_REC = "e30a7ffc-9ec5-4676-a6e9-73dc77cb0d7a"    # xx Recycling PET, RER
+PET_REC = "e30a7ffc-9ec5-4676-a6e9-73dc77cb0d7a"    # xx Recycling PET, RER: obsolete and empty (no inputs
+                                                    # or emissions), the only PET recycling dataset in bafu-2026
 PET_INC = "43268043-3dcf-45a5-ac35-45ea38d1412c"    # Disposal, PET, to municipal incineration
-PET_LF = "7a78d54d-595f-4873-89e1-b810ca9949e1"     # xx Disposal, PET, to sanitary landfill
+PET_LF = "e8828bdf-675f-4add-933f-66d2ed424341"     # Disposal, plastics, mixture, to sanitary landfill
 
 # ef-3.1-biosphere codes (emissions to non-urban air)
 CH4_BIO = "fe0acd60-3ddc-11dd-a8eb-0050c2490048"
@@ -75,7 +75,7 @@ def foreground():
         ds("dairy_farm", "dairy farm, per cow and year", "dairy_farm", [
             prod("raw milk, FPCM", fpcm(7000, fat_pct=4.1, protein_pct=3.4), role="milk"),
             prod("live cattle", 260),  # culled cow + calves sold, live weight
-            tech(GRASS, 3500), tech(HAY, 1000), tech(SILAGE, 1200),
+            tech(GRASS, 4500), tech(SILAGE, 1200),  # no current hay dataset (only "xx" ones)
             tech(WHEAT, 300), tech(MAIZE, 300), tech(SOY, 150),
             tech(DIESEL, 80), tech(ELEC_LV, 600), tech(WATER, 25000),
             bio(CH4_BIO, 140), bio(N2O, 1.5), bio(NH3, 25)]),
@@ -98,8 +98,10 @@ def foreground():
 
 
 def add_packaging(data):
-    """20 g PET tray via the CFF. A = 0.5 is the PEF default for plastics;
-    R1, R2, R3 and Qs/Qp are placeholders to replace with the Annex C values."""
+    """20 g PET tray via the CFF. A = 0.5 is the PEF value when Part C of Annex II has no
+    application- or material-specific A (check Part C for PET trays); R1 = 0 is the dairy PEFCR
+    default for PET cups. R2, R3 and Qs/Qp are placeholders to replace with Part C values.
+    Recycling (Erec, ErecEoL) is burden-free because bafu-2026 has no PET recycling inventory."""
     lookup = {(BG, c): {k: a[k] for k in ("name", "unit", "location")} | {"product": a["reference product"]}
               for c in (PET_V, PET_REC, PET_INC, PET_LF, HEAT, ELEC_MV)
               for a in [bd.get_node(database=BG, code=c)]}

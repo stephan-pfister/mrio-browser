@@ -1,17 +1,17 @@
 category,unit,normalisation_per_person,weighting_pct
-Climate change,kg CO2 eq,7.55E+03,21.06
-Ozone depletion,kg CFC-11 eq,5.23E-02,6.31
-"Ionising radiation, human health",kBq U-235 eq,4.22E+03,5.01
-Photochemical ozone formation - human health,kg NMVOC eq,4.09E+01,4.78
-EF-particulate Matter,disease incidence,5.95E-04,8.96
-"Human toxicity, non-cancer",CTUh,2.30E-04,1.84
-"Human toxicity, cancer",CTUh,1.69E-05,2.13
-Acidification,mol H+ eq,5.56E+01,6.20
-"Eutrophication, freshwater",kg P eq,1.61E+00,2.80
-Eutrophication marine,kg N eq,1.95E+01,2.96
-"Eutrophication, terrestrial",mol N eq,1.77E+02,3.71
-"Ecotoxicity, freshwater",CTUe,5.67E+04,1.92
-Land use,Pt,8.19E+05,7.94
-Water use,m3 world eq deprived,1.15E+04,8.51
-"Resource use, fossils",MJ,6.50E+04,8.32
-"Resource use, minerals and metals",kg Sb eq,6.36E-02,7.55
+Climate change,kg CO2 eq,7553.083162851173,21.06
+Ozone depletion,kg CFC-11 eq,0.0523483833840181,6.31
+"Ionising radiation, human health",kBq U-235 eq,4220.163390149926,5.01
+Photochemical ozone formation - human health,kg NMVOC eq,40.85919773477717,4.78
+EF-particulate Matter,disease incidence,0.0005953668211254782,8.96
+"Human toxicity, non-cancer",CTUh,0.00012873573500807206,1.84
+"Human toxicity, cancer",CTUh,1.725289765387052e-05,2.13
+Acidification,mol H+ eq,55.569541230601935,6.20
+"Eutrophication, freshwater",kg P eq,1.6068521282881294,2.80
+Eutrophication marine,kg N eq,19.54518155191912,2.96
+"Eutrophication, terrestrial",mol N eq,176.75499978894175,3.71
+"Ecotoxicity, freshwater",CTUe,56716.58633705956,1.92
+Land use,Pt,819498.1829230306,7.94
+Water use,m3 world eq deprived,11468.708640759718,8.51
+"Resource use, fossils",MJ,65004.259664016536,8.32
+"Resource use, minerals and metals",kg Sb eq,0.06362261523695466,7.55

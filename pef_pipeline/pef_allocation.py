@@ -13,13 +13,16 @@ Pipeline
 Foreground convention (wurst format): a multi-output dataset has several
 ``production`` exchanges; each carries ``properties`` such as
 ``{"mass": kg, "price": EUR/unit, "energy": MJ}`` and the dataset names its
-rule in ``pef_rule``.  Rules follow the EF Recommendation (EU) 2021/2279,
-Annex I, 4.5 and the agricultural modelling requirements (Annex IV).
+rule in ``pef_rule``.  Rules follow Recommendation (EU) 2021/2279, Annex I:
+4.5 multifunctionality (4.5.1 animal husbandry, Equation 8), 4.4.1 agricultural
+production, 4.4.8 CFF; and the dairy PEFCR (February 2025, 5.8.3 dairy processing).
 """
 
 import copy
+import math
 
 IDF_DAIRY_COEFF = 6.04  # IDF (2015) biophysical allocation, used by the PEF dairy rules
+MJ_PER_KWH = 3.6
 
 
 def fpcm(raw_milk_kg, fat_pct, protein_pct):
@@ -31,7 +34,7 @@ def _property_shares(products, prop):
     values = [p["amount"] * p["properties"][prop] for p in products]
     total = sum(values)
     if total <= 0:
-        raise ValueError(f"Sum of property '{prop}' is zero")
+        raise ValueError(f"Sum of property '{prop}' is not positive")
     return [v / total for v in values]
 
 
@@ -83,17 +86,35 @@ def allocation_factors(ds):
     return [(p, s) for p, s in zip(products, shares)]
 
 
+def scaled(exc, factor):
+    """Copy of an exchange with its amount and uncertainty scaled by ``factor`` (stats_arrays ids:
+    lognormal (2) shifts loc by ln(factor); normal (3) scales loc and scale; others scale loc/min/max)."""
+    e = copy.deepcopy(exc)
+    e["amount"] = exc["amount"] * factor
+    kind = exc.get("uncertainty type", 0)
+    keys = ("minimum", "maximum") if kind == 2 else ("loc", "minimum", "maximum") + (("scale",) if kind == 3 else ())
+    for k in keys:
+        if exc.get(k) is not None:
+            e[k] = exc[k] * factor
+    if kind == 2:
+        if factor > 0:
+            e["loc"] = exc.get("loc", math.log(abs(exc["amount"]))) + math.log(factor)
+        else:
+            e.update({"uncertainty type": 0, "loc": e["amount"]})
+    return e
+
+
 def split_multioutput(data):
     """Replace multi-output datasets by allocated single-output datasets.
 
-    Returns the new list and a log of the factors applied (for the PEF report).
-    Internal consumers are relinked to the split dataset matching their product.
+    Returns a new list (the input is not modified) and a log of the factors applied (for the
+    PEF report). Internal consumers are relinked to the split dataset matching their product.
     """
     out, log, relink = [], [], {}
     for ds in data:
         products = [e for e in ds["exchanges"] if e["type"] == "production"]
         if len(products) < 2:
-            out.append(ds)
+            out.append(copy.deepcopy(ds))
             continue
         for prod, share in allocation_factors(ds):
             new = copy.deepcopy(ds)
@@ -102,9 +123,7 @@ def split_multioutput(data):
             new["reference product"] = prod["product"]
             new["unit"] = prod["unit"]
             new["exchanges"] = [copy.deepcopy(prod)] + [
-                dict(e, amount=e["amount"] * share)
-                for e in ds["exchanges"]
-                if e["type"] != "production"
+                scaled(e, share) for e in ds["exchanges"] if e["type"] != "production"
             ]
             new["exchanges"][0]["name"] = new["name"]
             new["exchanges"][0]["input"] = (ds["database"], new["code"])
@@ -140,15 +159,19 @@ def cff_material(A, R1, R2, Qsin_Qp, Qsout_Qp, Ev, Erec, ErecEoL, Ev_star=None):
     ]
 
 
-def cff_energy_disposal(B, R2, R3, LHV, X_heat, X_elec, Eer, ESE_heat, ESE_elec, ED):
+def cff_energy_disposal(B, R2, R3, LHV, X_heat, X_elec, Eer, ESE_heat, ESE_elec, ED,
+                        heat_mj_per_unit=1.0, elec_mj_per_unit=MJ_PER_KWH):
     """Energy recovery and disposal parts of the CFF, per unit of material.
 
     (1-B) R3 (Eer - LHV X_heat ESE_heat - LHV X_elec ESE_elec) + (1-R2-R3) ED
+
+    LHV is in MJ per kg; the substituted energy is converted to the reference unit of the
+    ESE datasets (default: heat per MJ, electricity per kWh).
     """
     return [
         (Eer, (1 - B) * R3),
-        (ESE_heat, -(1 - B) * R3 * LHV * X_heat),
-        (ESE_elec, -(1 - B) * R3 * LHV * X_elec),
+        (ESE_heat, -(1 - B) * R3 * LHV * X_heat / heat_mj_per_unit),
+        (ESE_elec, -(1 - B) * R3 * LHV * X_elec / elec_mj_per_unit),
         (ED, 1 - R2 - R3),
     ]
 

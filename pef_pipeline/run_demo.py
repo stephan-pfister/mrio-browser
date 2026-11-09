@@ -111,7 +111,7 @@ def main():
         print(f"  {row['dataset']:<32} {row['product']:<30} {row['rule']:<15} {row['factor']:.3f}")
 
     # Packaging with the Circular Footprint Formula (PET tray, 20 g; parameters illustrative,
-    # take A, R1, R2, R3, Qs/Qp, B from Annex C of the EF method)
+    # take A, R1, R2, R3, Qs/Qp, B from Part C of Annex II of the PEF method)
     lookup = {(BG, c): {k: a[k] for k in ("name", "unit", "location")} | {"product": a["reference product"]}
               for c in ("pet_v", "pet_r", "pet_rec_eol", "pet_inc", "pet_landfill", "heat", "elec")
               for a in [bd.get_node(database=BG, code=c)]}

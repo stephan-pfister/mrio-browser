@@ -1,4 +1,5 @@
-"""PEF re-allocation of ecoinvent 3.9.1 cut-off dairy processes, EF 3.1 results for food markets.
+"""PEF re-allocation of ecoinvent 3.9.1 cut-off dairy processes, EF 3.1 results for the markets of
+agricultural, food and beverage products (ISIC 01, 10, 11; this includes seed, field services and fibres).
 
 ecoinvent allocates multi-output activities economically and keeps, for every co-product
 dataset, its production volume (PV) and properties (price, dry mass). With
@@ -7,7 +8,7 @@ co-product i, so a different allocation key only rescales each co-product column
 
     x'_i = x_i * AF_new_i / AF_old_i
 
-PEF rules applied (EF Recommendation (EU) 2021/2279, Annex IV; PEFCR dairy):
+PEF rules applied (Recommendation (EU) 2021/2279, Annex I 4.5.1; dairy PEFCR, February 2025, 5.8.3):
   idf       : dairy farm, AF_milk = 1 - 6.04 * M_cattle / M_milk (masses from PV)
   dry mass  : dairy plant co-products (cheese/whey, yogurt/cream, butter/buttermilk/skimmed milk)
 
@@ -66,15 +67,23 @@ def co_product_groups():
         props = prod.data.get("properties") or {}
         groups[(a.name, a.location)].append({
             "id": a.id, "product": a.product, "p": prod.data["amount"],
-            "pv": prod.data.get("production volume") or 0.0,
-            "price": props.get("price", {}).get("amount", 0.0),
-            "dry mass": props.get("dry mass", {}).get("amount", 0.0)})
+            "pv": prod.data.get("production volume"),
+            "price": props.get("price", {}).get("amount"),
+            "dry mass": props.get("dry mass", {}).get("amount")})
     return groups
 
 
-def shares(members, key):
-    v = np.array([m[key] * m["pv"] for m in members])
+def normalise(values):
+    v = np.array(values, dtype=float)
     return v / v.sum()
+
+
+def shares(members, key):
+    """Allocation shares by a property per unit of product times the production volume."""
+    for m in members:
+        if not m.get(key) or not m.get("pv") or m[key] < 0 or m["pv"] < 0:
+            raise ValueError(f"{m['product']}: missing or negative '{key}' or production volume")
+    return normalise([m[key] * m["pv"] for m in members])
 
 
 def allocation_changes(groups):
@@ -84,13 +93,15 @@ def allocation_changes(groups):
         af_old = shares(members, "price")
         if RULES[name] == "idf":
             milk = next(m for m in members if m["product"] == "cow milk")
-            bmr = sum(m["pv"] for m in members if m is not milk) / milk["pv"]
+            others = [m for m in members if m is not milk]
+            bmr = sum(m["pv"] for m in others) / milk["pv"]
             af_milk = 1 - IDF_COEFF * bmr
-            others = shares([m for m in members if m is not milk], "pv")
-            it = iter(others * (1 - af_milk))
+            it = iter(normalise([m["pv"] for m in others]) * (1 - af_milk))  # live animals by mass
             af_new = np.array([af_milk if m is milk else next(it) for m in members])
         else:
             af_new = shares(members, RULES[name])
+        if af_new.min() < 0 or af_new.max() > 1 or abs(af_new.sum() - 1) > 1e-9:
+            raise ValueError(f"{name} {loc}: invalid PEF allocation factors {af_new}")
         for m, o, n in zip(members, af_old, af_new):
             k[m["id"]] = n / o
             log.append({"activity": name, "location": loc, "product": m["product"], "rule": RULES[name],
@@ -126,14 +137,16 @@ def food_markets():
     return acts
 
 
-def rescale_columns(matrix, cols, factors, keep_diagonal=None):
+def rescale_columns(matrix, cols, factors, production=None):
+    """Multiply columns by factors; ``production`` = [(row, amount)] per column keeps the production
+    entry (self-consumption in the same cell is rescaled)."""
     m = matrix.tocsc(copy=True)
     for j, f in zip(cols, factors):
         start, end = m.indptr[j], m.indptr[j + 1]
         m.data[start:end] *= f
-    if keep_diagonal is not None:  # production stays; self-consumption is rescaled
-        for j, f, p in zip(cols, factors, keep_diagonal):
-            m[j, j] = p - f * (p - matrix[j, j])
+    if production is not None:
+        for j, f, (i, p) in zip(cols, factors, production):
+            m[i, j] = p - f * (p - matrix[i, j])
     return m.tocsr()
 
 
@@ -142,8 +155,11 @@ def main():
     methods = {CATEGORIES[m[1]]: m for m in bd.methods if m[0] == "EF v3.1" and m[1] in CATEGORIES}
     assert len(methods) == 16, sorted(methods)
     groups = co_product_groups()
+    deviation = check_economic(groups)
+    if deviation > 0.01:
+        raise ValueError(f"ecoinvent allocation is not the price key (deviation {deviation:.2%})")
     print(f"{len(groups)} multi-output dairy activities; ecoinvent allocation = price key "
-          f"(max deviation {check_economic(groups):.2%})")
+          f"(max deviation {deviation:.2%})")
     k, log = allocation_changes(groups)
     for row in log:
         print(f"  {row['activity'][:40]:<40} {row['location']:<6} {row['product'][:38]:<38} "
@@ -152,7 +168,7 @@ def main():
     markets = food_markets()
     fus = [(a.id, a.name, a.location, a.product) for a in markets] + \
           [(m["id"], name, loc, m["product"]) for (name, loc), ms in groups.items() for m in ms]
-    print(f"{len(markets)} food markets (ISIC 01, 10, 11) + {len(k)} re-allocated datasets")
+    print(f"{len(markets)} agricultural, food and beverage markets (ISIC 01, 10, 11) + {len(k)} re-allocated datasets")
 
     lca = bc.LCA({fus[0][0]: 1}, methods["Climate change"])
     lca.lci()
@@ -172,8 +188,8 @@ def main():
     base = run()
     cols = [lca.dicts.activity[j] for j in k]
     f = [k[j] for j in k]
-    prod = [next(m["p"] for ms in groups.values() for m in ms if m["id"] == j) for j in k]
-    lca.technosphere_matrix = rescale_columns(lca.technosphere_matrix, cols, f, keep_diagonal=prod)
+    prod = [(lca.dicts.product[j], next(m["p"] for ms in groups.values() for m in ms if m["id"] == j)) for j in k]
+    lca.technosphere_matrix = rescale_columns(lca.technosphere_matrix, cols, f, production=prod)
     lca.biosphere_matrix = rescale_columns(lca.biosphere_matrix, cols, f)
     pef = run()
 
@@ -193,7 +209,7 @@ def main():
     cc = [(r["PEF"] / r["ecoinvent"], r) for r in rows if r["category"] == "Climate change" and r["ecoinvent"]]
     changed = [x for x in cc if abs(x[0] - 1) > 0.01]
     print(f"\nClimate change: {len(changed)} of {len(cc)} products change by more than 1 % -> {OUT}")
-    for ratio, r in sorted(changed, key=lambda x: -abs(np.log(x[0])))[:25]:
+    for ratio, r in sorted(changed, key=lambda x: -np.inf if x[0] < 0 else -abs(np.log(x[0])))[:25]:
         print(f"  {r['activity'][:45]:<45} {r['location']:<6} {r['product'][:35]:<35} "
               f"{r['ecoinvent']:8.3f} -> {r['PEF']:8.3f}  x{ratio:.2f}")
 
