@@ -15,6 +15,8 @@ dairy PEFCR (February 2025) to Brightway databases and compares EF 3.1 results w
 | `hestia_db.py` | standalone HESTIA crop database on BAFU, PEF allocation | `bafu test`: writes `hestia-2026-04-30` |
 | `export_hestia_db.py` | own project `hestia-bafu-pef` + portable files (Brightway write format, Excel) | writes `reports/hestia_bw/` |
 | `import_hestia_db.py` | writes the portable files into any project, Brightway 2.5 or legacy 2 | any project |
+| `pef_databases.py` | PEF versions `bafu-2026-pef` and `hestia-2026-04-30-pef`, country water flows, methods `EF v3.1 PEF`; checks and exports them | `bafu test`; writes `reports/pef_bw/` |
+| `import_pef_databases.py` | writes the PEF files into any project, Brightway 2.5 or legacy 2 | any project |
 | `ef31_nw.csv` | EF 3.1 normalisation and weighting factors | JRC `Normalisation_Weighting_Factors_EF_3.1.xlsx` |
 
 Results go to `reports/`, which stays local because it holds numbers derived from licensed data
@@ -116,10 +118,12 @@ and water use change. Freshwater ecotoxicity changes for 90 products (median ×1
 than doubled, asparagus ×40–119 from deltamethrin in the seedlings, soybeans and soybean oil and meal
 BR ×20). Human toxicity changes for 45 (cancer) and 54 (non-cancer) products, mainly through the
 heavy-metal layer, and all 37 negative toxicity results disappear. The `water` layer changes water use
-for 95 products (median ×1.04; green beans CH ×0.035, palm MY ×0.08, sorghum CN ×0.09). Single score,
-over the 96 products with positive scores: median +2.1 %, 25 products up more than 10 %, 5 more than
-doubled, and down to ×0.56 where water use falls. These are the PEF method's default rules; under the
-dairy PEFCR the pesticide layer would not apply.
+for 81 products, mostly downwards (68 down, 9 up of the 95 with positive water use; median ×0.90; green
+beans CH ×0.03, palm MY ×0.07, sorghum CN ×0.07; at most ×1.14 for heated greenhouse strawberries CH):
+Swiss and many other country factors are far below the global one (CH 1.34 instead of 42.95 m³ world
+eq per m³). Single score, over the 96 products with positive scores: median +2.1 %, 25 products up more
+than 10 %, 5 more than doubled, and down to ×0.56 where water use falls. These are the PEF method's
+default rules; under the dairy PEFCR the pesticide layer would not apply.
 
 **BAFU data issue.** Three greenhouse and tunnel products have negative water use in BAFU's own
 published results: conventional strawberries from an unheated plastic tunnel, CH (−660 m³ world eq
@@ -170,6 +174,46 @@ them into any project; run it with the legacy environment for Activity Browser 2
 was made that way). BW2Packages are not used: Brightway 2.5 packages store characterisation factors by
 internal id and do not open in legacy Brightway. A round trip into both versions gives identical scores.
 
+## PEF versions of BAFU and HESTIA (`pef_databases.py`)
+
+```bash
+python pef_databases.py --build --verify --export
+```
+
+```bash
+python import_pef_databases.py <project>
+```
+
+The build writes into `bafu test`:
+
+| Database or methods | Content |
+|---|---|
+| `bafu-2026-pef` | bafu-2026 with the rules of `bafu_pef_compare.py` written into the exchanges: chromium fix (2,058 exchanges, 731 datasets), pesticides 90/9/1 (7,082 exchanges, 169 datasets), heavy metals (278 exchanges, 106 datasets), country water flows (6,621 exchanges, 650 datasets) |
+| `hestia-2026-04-30-pef` | hestia-2026-04-30 linked to `bafu-2026-pef`, water flows by country (538 exchanges, 448 datasets); its pesticides already follow PEF |
+| `ef-3.1-water-regional` | 359 country copies of EF 3.1 water flows |
+| `("EF v3.1 PEF", <category>)` | the 25 sentier EF v3.1 methods; water use adds the JRC country factors. For the original databases they equal sentier EF v3.1, so one method set serves all. |
+
+The copies are made with bw2data directly. wurst's extraction relinks internal exchanges by name,
+product, location and unit, which BAFU's duplicate names would break; rules that split an exchange
+scale its uncertainty with `pef_allocation.scaled`.
+
+**Check.** LCA on `bafu-2026-pef` reproduces the PEF column of `bafu_pef_compare.py` for the 100
+products: 12 categories to machine precision, toxicity and water use within 4e-6. The exported files,
+imported into new projects with Brightway 2.5 (`pef-bafu-hestia`) and legacy Brightway 2
+(`pef-bafu-hestia-AB2`), give the same scores as `bafu test`.
+
+**HESTIA, PEF version vs. original (684 datasets).** Water use changes for 625 datasets (median
+×0.99, 5th–95th percentile ×0.17–1.59: irrigation countries with factors above or below the global
+one). Human toxicity, cancer falls for all (median ×0.80), from the chromium fix in the BAFU
+background. Freshwater ecotoxicity rises for 170 (95th percentile ×1.07), from the pesticide rule in
+BAFU background datasets. The other categories do not change.
+
+**Files** (`reports/pef_bw/`, local): `manifest.json`, one `<database>.json.gz` per database in
+Brightway's write format, `ef-3.1-pef-methods.json.gz`, `pef_changes.csv` (every changed exchange
+with old and new flow and amount) and `CHANGES.md`. They contain modified BAFU data: BAFU's terms of
+use allow modification with documented changes (the change log and `CHANGES.md`), but not separate
+distribution, so they stay local.
+
 ## Validation
 
 ### Characterisation factors vs. JRC
@@ -212,6 +256,11 @@ An independent review, with each finding checked against the data, led to these 
   input; the ecoinvent script checks properties and factors, and indexes the production entry by
   product row; heavy metals are netted per dataset and flow; summaries show sign changes separately.
 - The ecoinvent results are unchanged by these corrections (identical files).
+- Water layer (found on 10 Nov 2026 by building `bafu-2026-pef`): the country factor was applied as
+  a change against JRC's global factor for released water (−42.955) instead of the method's own
+  (−42.95). For turbine water (54 million m³ taken in and released over all datasets, nearly
+  cancelling) this left 0.005 m³ world eq per m³ released and biased the water layer upwards: it had
+  shown a median ×1.04 with 55 products up and 36 down, instead of ×0.90 with 9 up and 68 down.
 
 ### Our BAFU baseline vs. BAFU's published EF 3.1 results
 
@@ -232,12 +281,12 @@ unspecified chromium emitted to soil and water is mapped to Cr(III), as BAFU's o
 
 Whey is left out: BAFU gives it no burden, so both values are about zero.
 
-**Water use is not part of the fix.** Country factors for every dataset (the `water` layer) make the
-products BAFU regionalises match exactly (asparagus PE and MX, green beans KE, the greenhouse and
-tunnel strawberries and tomatoes), but lower agreement overall from 80 to 33 of 94 products within
-10 % (palm MY, sorghum CN drop to ×0.08). BAFU regionalises water only in some datasets, which the
-Brightway import does not show. Country-level water use is a PEF requirement, so it is a PEF layer
-instead.
+**Water use is not part of the fix.** BAFU's published results use country factors only for some
+datasets, mostly newer vegetables and fruit, which the Brightway import does not show. Country factors
+for every dataset (the `water` layer) make those match (asparagus CH, MX and PE, green beans CH and KE,
+the greenhouse and tunnel strawberries and tomatoes) and move others away (palm MY, sorghum CN, cotton,
+rice and potatoes US); overall 79 instead of 80 of 94 products are within 10 %. Country-level water
+use is a PEF requirement, so it is a PEF layer.
 
 **What it means.** The baselines behind the main PEF findings match: asparagus (CH, MX, PE) and
 soybeans BR within 0.2 % for freshwater ecotoxicity. The BAFU and PEF versions use the same import,

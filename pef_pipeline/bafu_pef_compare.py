@@ -103,8 +103,9 @@ def pick(candidates, ref):
                                           c["name"] != ref["name"], c["code"]))
 
 
-def emission_changes(water_cf):
-    """Per activity id: {flow id: delta amount} for each layer, plus water-use score deltas (water)."""
+def flow_lookups(water_cf):
+    """EF 3.1 flows by key; pesticide target flows by name and compartment; the Cr(III) flow per
+    compartment; JRC water-use factors {location or None: CF} per water flow key."""
     flows = {f.key: f for f in bd.Database(BIO)}
     by_name = defaultdict(lambda: defaultdict(list))
     for f in flows.values():
@@ -114,15 +115,21 @@ def emission_changes(water_cf):
     cr3 = {}
     for f in sorted(flows.values(), key=lambda f: f["code"]):
         if f["name"].lower() in CR3_NAMES:
-            cr3.setdefault(tuple(f["categories"]), f.id)
+            cr3.setdefault(tuple(f["categories"]), f)
     water = {k: water_cf[(f["name"].lower(), f["categories"][-1])] for k, f in flows.items()
              if f.get("categories") and (f["name"].lower(), f["categories"][-1]) in water_cf}
+    return flows, by_name, cr3, water
+
+
+def emission_changes(water_cf):
+    """Per activity id: {flow id: delta amount} for each layer, plus water-use score deltas (water)."""
+    flows, by_name, cr3, water = flow_lookups(water_cf)
     ag_ids = {a.id for a in bd.Database(DB) if a.get("sector") == "agriculture"}
     acts = {(a.database, a.code): (a.id, a.location)
             for a in AD.select(AD.id, AD.database, AD.code, AD.location).where(AD.database == DB)}
 
     layers = {k: defaultdict(lambda: defaultdict(float)) for k in ("fix", "pest", "hm", "water")}
-    regional, hm_net = defaultdict(float), defaultdict(float)
+    regional, hm_net = defaultdict(list), defaultdict(float)  # regional: [(flow id, amount, country CF)]
     pesticides, missing, no_cr3, duplicates = set(), set(), set(), {}
     for exc in ED.select().where((ED.output_database == DB) & (ED.type == "biosphere") & (ED.input_database == BIO)):
         key = (exc.input_database, exc.input_code)
@@ -131,12 +138,12 @@ def emission_changes(water_cf):
         cat, fid, name = tuple(f.get("categories") or ()), f.id, f["name"]
 
         if key in water and water[key].get(loc) is not None:
-            regional[j] += v * (water[key][loc] - water[key][None])
+            regional[j].append((fid, v, water[key][loc]))
         if name.lower() == "chromium" and len(cat) > 1 and cat[1] in CR_REMAP:
             if cat in cr3:
                 layers["fix"][j][fid] -= v
-                layers["fix"][j][cr3[cat]] += v
-                fid = cr3[cat]
+                layers["fix"][j][cr3[cat].id] += v
+                fid = cr3[cat].id
             else:
                 no_cr3.add(cat[-1])
 
@@ -196,10 +203,10 @@ def main(jrc_cf=JRC_CF):
             for j, flows in changes.items():
                 if j in col:
                     d[col[j]] = sum(dv * cfs[m].get(f, 0.0) for f, dv in flows.items())
-            if layer == "water" and m[2] == "Water use":
-                for j, ds in regional.items():
+            if layer == "water" and m[2] == "Water use":  # country factor instead of the method's factor
+                for j, entries in regional.items():
                     if j in col:
-                        d[col[j]] += ds
+                        d[col[j]] += sum(v * (cf - cfs[m].get(f, 0.0)) for f, v, cf in entries)
             delta[layer, m] = d
     cvec = {}
     for m in methods:
